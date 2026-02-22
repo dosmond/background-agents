@@ -230,6 +230,12 @@ variable "deployment_name" {
   type        = string
 }
 
+variable "vercel_custom_domain" {
+  description = "Optional custom domain for callback/auth URLs (for example: app.example.com). This does not manage Vercel domain assignment."
+  type        = string
+  default     = ""
+}
+
 variable "enable_durable_object_bindings" {
   description = "Enable DO bindings. For initial deployment: set to false (applies migrations), then set to true (adds bindings)."
   type        = bool

@@ -76,7 +76,8 @@ brew install node@22
 
 1. **OAuth App** - For user authentication
    - Create at: https://github.com/settings/developers
-   - Callback URL: `https://<your-vercel-app>.vercel.app/api/auth/callback/github`
+   - Callback URL: `https://<your-app-domain>/api/auth/callback/github` (`<your-app-domain>` can be
+     either `*.vercel.app` or your custom domain)
 
 2. **GitHub App** - For repository access in sandboxes
    - Create at: https://github.com/settings/apps

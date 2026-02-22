@@ -140,6 +140,10 @@ nextauth_secret = ""
 # The web app URL will be: https://open-inspect-{deployment_name}.vercel.app
 deployment_name = ""
 
+# Optional custom domain for the web app (for example: "app.example.com")
+# When set, callback/auth URLs use this domain. Domain assignment is managed outside Terraform.
+vercel_custom_domain = ""
+
 # Path to project root (relative to this directory)
 project_root = "../../../"
 

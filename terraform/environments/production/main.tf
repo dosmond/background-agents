@@ -15,6 +15,7 @@ locals {
   control_plane_host = "open-inspect-control-plane-${local.name_suffix}.${var.cloudflare_worker_subdomain}.workers.dev"
   control_plane_url  = "https://${local.control_plane_host}"
   web_app_url        = "https://open-inspect-${local.name_suffix}.vercel.app"
+  web_app_callback_url = length(trimspace(var.vercel_custom_domain)) > 0 ? "https://${trimspace(var.vercel_custom_domain)}" : local.web_app_url
   ws_url             = "wss://${local.control_plane_host}"
 
   # Worker script paths (deterministic output locations)
@@ -387,7 +388,7 @@ module "web_app" {
     # NextAuth
     {
       key       = "NEXTAUTH_URL"
-      value     = local.web_app_url
+      value     = local.web_app_callback_url
       targets   = ["production"]
       sensitive = false
     },
