@@ -140,6 +140,24 @@ def parse_git_numstat(output: str) -> dict[str, dict[str, int]]:
     return stats
 
 
+def _repo_command(cmd: str) -> str:
+    """
+    Build a command that resolves repo root under /workspace before running git.
+    """
+    return (
+        "set -euo pipefail; "
+        "repo_dir=$(python - <<'PY'\n"
+        "from pathlib import Path\n"
+        "repo_dirs = list(Path('/workspace').glob('*/.git'))\n"
+        "print(repo_dirs[0].parent if repo_dirs else '')\n"
+        "PY\n"
+        "); "
+        "if [ -z \"$repo_dir\" ]; then echo 'REPO_NOT_FOUND' >&2; exit 2; fi; "
+        'cd "$repo_dir"; '
+        f"{cmd}"
+    )
+
+
 @app.function(
     image=function_image,
     volumes={"/data": inspect_volume},
@@ -673,10 +691,9 @@ async def api_git_changes(
             raise HTTPException(status_code=404, detail=f"Sandbox not found: {sandbox_id}")
 
         status_proc = handle.modal_sandbox.exec(
-            "git",
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
+            "bash",
+            "-lc",
+            _repo_command("git status --porcelain=v1 --untracked-files=all"),
             timeout=10,
         )
         status_proc.wait()
@@ -699,7 +716,12 @@ async def api_git_changes(
                 },
             }
 
-        numstat_proc = handle.modal_sandbox.exec("git", "diff", "--numstat", timeout=10)
+        numstat_proc = handle.modal_sandbox.exec(
+            "bash",
+            "-lc",
+            _repo_command("git diff --numstat"),
+            timeout=10,
+        )
         numstat_proc.wait()
         numstat_output = numstat_proc.stdout.read()
         numstat_stats = parse_git_numstat(numstat_output)
@@ -724,7 +746,12 @@ async def api_git_changes(
 
             # Untracked files are not included in git diff; synthesize add-only numstat.
             if status == "untracked":
-                wc_proc = handle.modal_sandbox.exec("wc", "-l", filename, timeout=5)
+                wc_proc = handle.modal_sandbox.exec(
+                    "bash",
+                    "-lc",
+                    _repo_command(f"wc -l {filename!r}"),
+                    timeout=5,
+                )
                 wc_proc.wait()
                 wc_output = wc_proc.stdout.read().strip()
                 if wc_proc.returncode == 0 and wc_output:
@@ -748,16 +775,18 @@ async def api_git_changes(
 
             if status == "untracked":
                 diff_proc = handle.modal_sandbox.exec(
-                    "git",
-                    "diff",
-                    "--no-index",
-                    "--",
-                    "/dev/null",
-                    filename,
+                    "bash",
+                    "-lc",
+                    _repo_command(f"git diff --no-index -- /dev/null {filename!r}"),
                     timeout=10,
                 )
             else:
-                diff_proc = handle.modal_sandbox.exec("git", "diff", "--", filename, timeout=10)
+                diff_proc = handle.modal_sandbox.exec(
+                    "bash",
+                    "-lc",
+                    _repo_command(f"git diff -- {filename!r}"),
+                    timeout=10,
+                )
             diff_proc.wait()
             diff_text = diff_proc.stdout.read()
             if not diff_text:

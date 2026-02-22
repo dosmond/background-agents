@@ -1721,10 +1721,20 @@ export class SessionDO extends DurableObject<Env> {
       });
       return Response.json(data);
     } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
       this.log.error("Failed to fetch git changes", {
-        error: error instanceof Error ? error.message : String(error),
+        error: detail,
       });
-      return Response.json({ error: "Failed to fetch git changes" }, { status: 502 });
+      if (detail.includes("invalid function call")) {
+        return Response.json(
+          {
+            error:
+              "Git changes endpoint is not available in the current Modal deployment. Deploy modal-infra to a version that includes api_git_changes.",
+          },
+          { status: 503 }
+        );
+      }
+      return Response.json({ error: `Failed to fetch git changes: ${detail}` }, { status: 502 });
     }
   }
 
