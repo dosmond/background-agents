@@ -1022,6 +1022,7 @@ export class SessionDO extends DurableObject<Env> {
       content: string;
       model?: string;
       reasoningEffort?: string;
+      includeContext?: boolean;
       attachments?: Array<{ type: string; name: string; url?: string; content?: string }>;
     }
   ): Promise<void> {
@@ -1593,6 +1594,7 @@ export class SessionDO extends DurableObject<Env> {
         source: string;
         model?: string;
         reasoningEffort?: string;
+        includeContext?: boolean;
         attachments?: Array<{ type: string; name: string; url?: string }>;
         callbackContext?: Record<string, unknown>;
       };

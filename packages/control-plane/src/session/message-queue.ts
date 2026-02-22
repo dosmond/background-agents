@@ -15,11 +15,13 @@ import type { SessionWebSocketManager } from "./websocket-manager";
 import type { ParticipantService } from "./participant-service";
 import type { CallbackNotificationService } from "./callback-notification-service";
 import { getAvatarUrl } from "./participant-service";
+import { ContextRetrievalService } from "../context/context-retrieval-service";
 
 interface PromptMessageData {
   content: string;
   model?: string;
   reasoningEffort?: string;
+  includeContext?: boolean;
   attachments?: Array<{ type: string; name: string; url?: string; content?: string }>;
 }
 
@@ -43,6 +45,46 @@ interface MessageQueueDeps {
 
 export class SessionMessageQueue {
   constructor(private readonly deps: MessageQueueDeps) {}
+
+  private shouldUseContext(callbackContextJson: string | null): boolean {
+    if (!callbackContextJson) return true;
+    try {
+      const parsed = JSON.parse(callbackContextJson) as { includeContext?: unknown };
+      return parsed.includeContext !== false;
+    } catch {
+      return true;
+    }
+  }
+
+  private async buildContextPrompt(
+    repoOwner: string,
+    repoName: string,
+    content: string
+  ): Promise<{ content: string; contextItems: number }> {
+    if (this.deps.env.CONTEXT_RETRIEVAL_ENABLED === "false") {
+      return { content, contextItems: 0 };
+    }
+
+    try {
+      const retrievalService = new ContextRetrievalService(this.deps.env);
+      const search = await retrievalService.searchContext(repoOwner, repoName, content, 4);
+      if (!search.results.length) return { content, contextItems: 0 };
+
+      const contextBlock = search.results
+        .map((result, index) => {
+          const citation = result.citations[0];
+          return `[Context ${index + 1}] ${result.title}\n${citation?.excerpt || ""}`;
+        })
+        .join("\n\n");
+
+      return {
+        content: `${content}\n\n---\nAdditional business context (use when relevant):\n${contextBlock}`,
+        contextItems: search.results.length,
+      };
+    } catch {
+      return { content, contextItems: 0 };
+    }
+  }
 
   async handlePromptMessage(ws: WebSocket, data: PromptMessageData): Promise<void> {
     const client = this.deps.getClientInfo(ws);
@@ -86,6 +128,7 @@ export class SessionMessageQueue {
       model: messageModel,
       reasoningEffort: messageReasoningEffort,
       attachments: data.attachments ? JSON.stringify(data.attachments) : null,
+      callbackContext: JSON.stringify({ includeContext: data.includeContext ?? true }),
       status: "pending",
       createdAt: now,
     });
@@ -165,11 +208,19 @@ export class SessionMessageQueue {
       message.reasoning_effort ??
       session?.reasoning_effort ??
       getDefaultReasoningEffort(resolvedModel);
+    const includeContext = this.shouldUseContext(message.callback_context);
+    const enriched = includeContext
+      ? await this.buildContextPrompt(
+          session?.repo_owner || "",
+          session?.repo_name || "",
+          message.content
+        )
+      : { content: message.content, contextItems: 0 };
 
     const command: SandboxCommand = {
       type: "prompt",
       messageId: message.id,
-      content: message.content,
+      content: enriched.content,
       model: resolvedModel,
       reasoningEffort: resolvedEffort,
       author: {
@@ -195,6 +246,8 @@ export class SessionMessageQueue {
       sandbox_ready_state: sandboxWs.readyState,
       queue_wait_ms: now - message.created_at,
       has_attachments: !!message.attachments,
+      include_context: includeContext,
+      context_items: enriched.contextItems,
     });
   }
 
@@ -300,6 +353,7 @@ export class SessionMessageQueue {
     source: string;
     model?: string;
     reasoningEffort?: string;
+    includeContext?: boolean;
     attachments?: Array<{ type: string; name: string; url?: string }>;
     callbackContext?: Record<string, unknown>;
   }): Promise<{ messageId: string; status: "queued" }> {
@@ -334,7 +388,10 @@ export class SessionMessageQueue {
       model: messageModel,
       reasoningEffort: messageReasoningEffort,
       attachments: data.attachments ? JSON.stringify(data.attachments) : null,
-      callbackContext: data.callbackContext ? JSON.stringify(data.callbackContext) : null,
+      callbackContext: JSON.stringify({
+        ...(data.callbackContext || {}),
+        includeContext: data.includeContext ?? true,
+      }),
       status: "pending",
       createdAt: now,
     });

@@ -5,6 +5,7 @@ import Link from "next/link";
 import useSWR, { mutate } from "swr";
 import { buildSessionHref, type SessionItem } from "@/components/session-sidebar";
 import { formatRelativeTime } from "@/lib/time";
+import { ContextDocumentsSettings } from "@/components/settings/context-documents-settings";
 
 const PAGE_SIZE = 20;
 const ARCHIVED_SESSIONS_KEY = `/api/sessions?status=archived&limit=${PAGE_SIZE}&offset=0`;
@@ -110,6 +111,8 @@ export function DataControlsSettings() {
           </button>
         )}
       </div>
+
+      <ContextDocumentsSettings />
     </div>
   );
 }

@@ -39,6 +39,9 @@ export interface Env {
   WEB_APP_URL?: string; // Base URL for the web app (for PR links)
   CF_ACCOUNT_ID?: string; // Cloudflare account ID
   MODAL_WORKSPACE?: string; // Modal workspace name (used in Modal endpoint URLs)
+  CLOUDFLARE_AI_SEARCH_API_TOKEN?: string; // API token for Cloudflare AI Search (AutoRAG)
+  CLOUDFLARE_AI_SEARCH_AUTORAG_NAME?: string; // AutoRAG instance name
+  CONTEXT_RETRIEVAL_ENABLED?: string; // Feature flag: "true" | "false"
 
   // Sandbox lifecycle configuration
   SANDBOX_INACTIVITY_TIMEOUT_MS?: string; // Inactivity timeout in ms (default: 600000 = 10 min)
@@ -92,6 +95,7 @@ export type ClientMessage =
       content: string;
       model?: string;
       reasoningEffort?: string;
+      includeContext?: boolean;
       attachments?: Attachment[];
     }
   | { type: "stop" }

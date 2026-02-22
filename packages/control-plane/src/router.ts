@@ -34,6 +34,7 @@ import { modelPreferencesRoutes } from "./routes/model-preferences";
 import { reposRoutes } from "./routes/repos";
 import { mcpRoutes } from "./routes/mcp";
 import { secretsRoutes } from "./routes/secrets";
+import { contextRoutes } from "./routes/context";
 
 const logger = createLogger("router");
 
@@ -384,6 +385,9 @@ const routes: Route[] = [
   // MCP configuration
   ...mcpRoutes,
 
+  // Repository context documents and retrieval
+  ...contextRoutes,
+
   // Model preferences
   ...modelPreferencesRoutes,
 
@@ -719,6 +723,7 @@ async function handleSessionPrompt(
     source?: string;
     model?: string;
     reasoningEffort?: string;
+    includeContext?: boolean;
     attachments?: Array<{ type: string; name: string; url?: string }>;
     callbackContext?: CallbackContext;
   };
@@ -742,6 +747,7 @@ async function handleSessionPrompt(
           source: body.source || "web",
           model: body.model,
           reasoningEffort: body.reasoningEffort,
+          includeContext: body.includeContext ?? true,
           attachments: body.attachments,
           callbackContext: body.callbackContext,
         }),

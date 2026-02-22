@@ -52,6 +52,25 @@ variable "modal_workspace" {
   type        = string
 }
 
+variable "cloudflare_ai_search_autorag_name" {
+  description = "Cloudflare AI Search AutoRAG name for context retrieval (optional)"
+  type        = string
+  default     = ""
+}
+
+variable "cloudflare_ai_search_api_token" {
+  description = "Cloudflare API token used to query AI Search AutoRAG (optional)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "context_retrieval_enabled" {
+  description = "Enable contextual retrieval in prompt preprocessing"
+  type        = bool
+  default     = false
+}
+
 # =============================================================================
 # GitHub OAuth App Credentials
 # =============================================================================

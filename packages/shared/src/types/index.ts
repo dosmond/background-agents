@@ -149,6 +149,7 @@ export type ClientMessage =
       content: string;
       model?: string;
       reasoningEffort?: string;
+      includeContext?: boolean;
       attachments?: Attachment[];
     }
   | { type: "stop" }
@@ -237,6 +238,49 @@ export interface McpServerConfig {
 
 export interface RepoMcpConfig {
   mcpServers: Record<string, McpServerConfig>;
+}
+
+export type ContextDocumentSourceType =
+  | "meeting"
+  | "slack"
+  | "linear"
+  | "note"
+  | "upload"
+  | "other";
+
+export type ContextIngestStatus = "pending_index" | "indexed" | "failed";
+
+export interface RepoContextDocument {
+  id: string;
+  repoOwner: string;
+  repoName: string;
+  title: string;
+  sourceType: ContextDocumentSourceType;
+  content: string;
+  tags?: string[];
+  timeframeStart?: number;
+  timeframeEnd?: number;
+  metadata?: Record<string, unknown>;
+  ingestStatus: ContextIngestStatus;
+  indexedAt?: number;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ContextCitation {
+  documentId: string;
+  title: string;
+  excerpt: string;
+  score?: number;
+}
+
+export interface ContextSearchResult {
+  id: string;
+  title: string;
+  sourceType: string;
+  score: number;
+  citations: ContextCitation[];
 }
 
 export interface EnrichedRepository extends InstallationRepository {

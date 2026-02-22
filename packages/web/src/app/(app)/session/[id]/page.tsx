@@ -169,6 +169,7 @@ function SessionPageContent() {
   const [reasoningEffort, setReasoningEffort] = useState<string | undefined>(
     getDefaultReasoningEffort(DEFAULT_MODEL)
   );
+  const [includeContext, setIncludeContext] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -203,7 +204,7 @@ function SessionPageContent() {
     e.preventDefault();
     if (!prompt.trim() || isProcessing) return;
 
-    sendPrompt(prompt, selectedModel, reasoningEffort);
+    sendPrompt(prompt, selectedModel, reasoningEffort, includeContext);
     setPrompt("");
     // Revalidate sidebar so this session bubbles to the top
     mutate("/api/sessions");
@@ -248,12 +249,14 @@ function SessionPageContent() {
       isProcessing={isProcessing}
       selectedModel={selectedModel}
       reasoningEffort={reasoningEffort}
+      includeContext={includeContext}
       inputRef={inputRef}
       handleSubmit={handleSubmit}
       handleInputChange={handleInputChange}
       handleKeyDown={handleKeyDown}
       setSelectedModel={handleModelChange}
       setReasoningEffort={setReasoningEffort}
+      setIncludeContext={setIncludeContext}
       stopExecution={stopExecution}
       handleArchive={handleArchive}
       handleUnarchive={handleUnarchive}
@@ -282,12 +285,14 @@ function SessionContent({
   isProcessing,
   selectedModel,
   reasoningEffort,
+  includeContext,
   inputRef,
   handleSubmit,
   handleInputChange,
   handleKeyDown,
   setSelectedModel,
   setReasoningEffort,
+  setIncludeContext,
   stopExecution,
   handleArchive,
   handleUnarchive,
@@ -312,12 +317,14 @@ function SessionContent({
   isProcessing: boolean;
   selectedModel: string;
   reasoningEffort: string | undefined;
+  includeContext: boolean;
   inputRef: React.RefObject<HTMLTextAreaElement | null>;
   handleSubmit: (e: React.FormEvent) => void;
   handleInputChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
   handleKeyDown: (e: React.KeyboardEvent) => void;
   setSelectedModel: (model: string) => void;
   setReasoningEffort: (value: string | undefined) => void;
+  setIncludeContext: (value: boolean) => void;
   stopExecution: () => void;
   handleArchive: () => void | Promise<void>;
   handleUnarchive: () => void | Promise<void>;
@@ -816,6 +823,16 @@ function SessionContent({
                   onSelect={setReasoningEffort}
                   disabled={isProcessing}
                 />
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={includeContext}
+                    onChange={(e) => setIncludeContext(e.target.checked)}
+                    disabled={isProcessing}
+                    className="h-3.5 w-3.5 border border-border-muted bg-input"
+                  />
+                  Include business context
+                </label>
               </div>
 
               {/* Right side - Agent label */}
