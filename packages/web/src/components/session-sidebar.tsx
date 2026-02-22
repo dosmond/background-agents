@@ -4,11 +4,17 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useMemo } from "react";
 import { useSession, signOut } from "next-auth/react";
-import useSWR from "swr";
+import useSWR, { mutate } from "swr";
 import { formatRelativeTime, isInactiveSession } from "@/lib/time";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
 import { useIsMobile } from "@/hooks/use-media-query";
-import { SidebarIcon, InspectIcon, PlusIcon, SettingsIcon } from "@/components/ui/icons";
+import {
+  SidebarIcon,
+  InspectIcon,
+  PlusIcon,
+  SettingsIcon,
+  ArchiveIcon,
+} from "@/components/ui/icons";
 import { Button } from "@/components/ui/button";
 
 export interface SessionItem {
@@ -42,6 +48,7 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
   const { data: authSession } = useSession();
   const pathname = usePathname();
   const [searchQuery, setSearchQuery] = useState("");
+  const [archivingIds, setArchivingIds] = useState<Set<string>>(new Set());
   const isMobile = useIsMobile();
 
   const { data, isLoading: loading } = useSWR<{ sessions: SessionItem[] }>(
@@ -84,6 +91,35 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
   }, [sessions, searchQuery]);
 
   const currentSessionId = pathname?.startsWith("/session/") ? pathname.split("/")[2] : null;
+  const handleArchive = async (sessionId: string) => {
+    const confirmed = window.confirm(
+      "Archive this session? You can restore archived sessions from Settings > Data Controls."
+    );
+    if (!confirmed) return;
+
+    setArchivingIds((prev) => {
+      const next = new Set(prev);
+      next.add(sessionId);
+      return next;
+    });
+
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/archive`, { method: "POST" });
+      if (response.ok) {
+        mutate("/api/sessions");
+      } else {
+        console.error("Failed to archive session from sidebar");
+      }
+    } catch (error) {
+      console.error("Archive session error:", error);
+    } finally {
+      setArchivingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(sessionId);
+        return next;
+      });
+    }
+  };
 
   return (
     <aside className="w-72 h-dvh flex flex-col border-r border-border-muted bg-background">
@@ -178,6 +214,8 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
                 isActive={session.id === currentSessionId}
                 isMobile={isMobile}
                 onSessionSelect={onSessionSelect}
+                onArchive={handleArchive}
+                isArchiving={archivingIds.has(session.id)}
               />
             ))}
 
@@ -196,6 +234,8 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
                     isActive={session.id === currentSessionId}
                     isMobile={isMobile}
                     onSessionSelect={onSessionSelect}
+                    onArchive={handleArchive}
+                    isArchiving={archivingIds.has(session.id)}
                   />
                 ))}
               </>
@@ -212,34 +252,58 @@ function SessionListItem({
   isActive,
   isMobile,
   onSessionSelect,
+  onArchive,
+  isArchiving,
 }: {
   session: SessionItem;
   isActive: boolean;
   isMobile: boolean;
   onSessionSelect?: () => void;
+  onArchive?: (sessionId: string) => Promise<void> | void;
+  isArchiving?: boolean;
 }) {
   const timestamp = session.updatedAt || session.createdAt;
   const relativeTime = formatRelativeTime(timestamp);
   const displayTitle = session.title || `${session.repoOwner}/${session.repoName}`;
   const repoInfo = `${session.repoOwner}/${session.repoName}`;
   return (
-    <Link
-      href={buildSessionHref(session)}
-      onClick={() => {
-        if (isMobile) {
-          onSessionSelect?.();
-        }
-      }}
-      className={`block px-4 py-2.5 border-l-2 transition ${
+    <div
+      className={`group flex items-center gap-2 border-l-2 px-4 py-2.5 transition ${
         isActive ? "border-l-accent bg-accent-muted" : "border-l-transparent hover:bg-muted"
       }`}
     >
-      <div className="truncate text-sm font-medium text-foreground">{displayTitle}</div>
-      <div className="flex items-center gap-1 mt-0.5 text-xs text-muted-foreground">
-        <span>{relativeTime}</span>
-        <span>·</span>
-        <span className="truncate">{repoInfo}</span>
-      </div>
-    </Link>
+      <Link
+        href={buildSessionHref(session)}
+        onClick={() => {
+          if (isMobile) {
+            onSessionSelect?.();
+          }
+        }}
+        className="min-w-0 flex-1"
+      >
+        <div className="truncate text-sm font-medium text-foreground">{displayTitle}</div>
+        <div className="mt-0.5 flex items-center gap-1 text-xs text-muted-foreground">
+          <span>{relativeTime}</span>
+          <span>·</span>
+          <span className="truncate">{repoInfo}</span>
+        </div>
+      </Link>
+      <button
+        type="button"
+        disabled={isArchiving}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onArchive?.(session.id);
+        }}
+        className={`flex h-7 w-7 shrink-0 items-center justify-center text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 ${
+          isMobile ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+        }`}
+        title="Archive session"
+        aria-label="Archive session"
+      >
+        <ArchiveIcon className="h-4 w-4" />
+      </button>
+    </div>
   );
 }
