@@ -18,7 +18,7 @@ const jetBrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Danstack Background Agents",
+  title: "Danstack AI",
   description: "Danstack background agent manager",
 };
 
