@@ -126,6 +126,13 @@ module "control_plane_worker" {
     }
   ]
 
+  r2_buckets = [
+    {
+      binding_name = "CONTEXT_DOCUMENTS_BUCKET"
+      bucket_name  = "open-inspect-context-search"
+    }
+  ]
+
   service_bindings = concat(
     [
       {

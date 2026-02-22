@@ -22,24 +22,6 @@ export interface CloudflareAiSearchQueryOptions {
   reranking?: { enabled?: boolean; model?: string };
 }
 
-export interface CloudflareAiSearchIndexDocumentInput {
-  documentId: string;
-  filename: string;
-  content: string;
-  attributes?: Record<string, unknown>;
-}
-
-export class CloudflareAiSearchError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-    readonly details?: string
-  ) {
-    super(message);
-    this.name = "CloudflareAiSearchError";
-  }
-}
-
 export class CloudflareAiSearchClient {
   constructor(private readonly env: Env) {}
 
@@ -52,10 +34,6 @@ export class CloudflareAiSearchClient {
   }
 
   private endpoint(path: "search" | "ai-search"): string {
-    return `https://api.cloudflare.com/client/v4/accounts/${this.env.CF_ACCOUNT_ID}/autorag/rags/${this.env.CLOUDFLARE_AI_SEARCH_AUTORAG_NAME}/${path}`;
-  }
-
-  private ingestEndpoint(path: string): string {
     return `https://api.cloudflare.com/client/v4/accounts/${this.env.CF_ACCOUNT_ID}/autorag/rags/${this.env.CLOUDFLARE_AI_SEARCH_AUTORAG_NAME}/${path}`;
   }
 
@@ -118,59 +96,5 @@ export class CloudflareAiSearchClient {
         attributes: row.attributes,
       })),
     };
-  }
-
-  async indexDocument(input: CloudflareAiSearchIndexDocumentInput): Promise<void> {
-    if (!this.isConfigured()) {
-      throw new CloudflareAiSearchError("Cloudflare AI Search is not configured", 500);
-    }
-
-    const candidatePaths = ["documents", "ingest", "index"];
-    let lastError: CloudflareAiSearchError | null = null;
-
-    for (const path of candidatePaths) {
-      const response = await fetch(this.ingestEndpoint(path), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.env.CLOUDFLARE_AI_SEARCH_API_TOKEN!}`,
-        },
-        body: JSON.stringify({
-          documents: [
-            {
-              id: input.documentId,
-              filename: input.filename,
-              content: input.content,
-              attributes: input.attributes ?? {},
-            },
-          ],
-        }),
-      });
-
-      if (response.ok) return;
-
-      let details: string | undefined;
-      try {
-        details = await response.text();
-      } catch {
-        details = undefined;
-      }
-
-      const error = new CloudflareAiSearchError(
-        `Cloudflare AI Search index request failed (${path})`,
-        response.status,
-        details
-      );
-
-      if (response.status === 404 || response.status === 405) {
-        lastError = error;
-        continue;
-      }
-      throw error;
-    }
-
-    throw (
-      lastError ?? new CloudflareAiSearchError("Cloudflare AI Search index request failed", 500)
-    );
   }
 }

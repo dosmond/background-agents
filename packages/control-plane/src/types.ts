@@ -16,6 +16,7 @@ export interface Env {
 
   // D1 database
   DB: D1Database;
+  CONTEXT_DOCUMENTS_BUCKET?: R2Bucket;
 
   // Secrets
   GITHUB_CLIENT_ID?: string;
