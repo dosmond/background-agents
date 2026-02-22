@@ -6,6 +6,7 @@ import {
   type ContextIngestStatus,
 } from "../db/repo-context-documents";
 import { ContextRetrievalService } from "../context/context-retrieval-service";
+import { CloudflareAiSearchClient, CloudflareAiSearchError } from "../context/cloudflare-ai-search";
 import type { Env } from "../types";
 import {
   type Route,
@@ -17,6 +18,8 @@ import {
 } from "./shared";
 
 const logger = createLogger("router:context");
+const INDEX_RETRY_ATTEMPTS = 2;
+const RETRY_DELAY_MS = 1000;
 
 function ensureDb(env: Env): Response | null {
   if (!env.DB) return error("Context storage is not configured", 503);
@@ -32,6 +35,97 @@ function inferSummary(content: string): string {
   const compact = content.trim().replace(/\s+/g, " ");
   if (compact.length <= 320) return compact;
   return `${compact.slice(0, 319)}...`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableError(error: unknown): boolean {
+  if (error instanceof CloudflareAiSearchError) {
+    return error.status === 429 || error.status >= 500;
+  }
+  return false;
+}
+
+async function indexDocumentInBackground(
+  env: Env,
+  owner: string,
+  name: string,
+  documentId: string,
+  correlation: { requestId: string; traceId: string }
+): Promise<void> {
+  const store = new RepoContextDocumentsStore(env.DB);
+  const document = await store.getDocument(owner, name, documentId);
+  if (!document) return;
+
+  if (env.CONTEXT_INDEXING_ENABLED === "false") {
+    await store.markIndexFailed(owner, name, documentId, "Context indexing is disabled");
+    return;
+  }
+
+  const aiSearch = new CloudflareAiSearchClient(env);
+  if (!aiSearch.isConfigured()) {
+    await store.markIndexFailed(owner, name, documentId, "Cloudflare AI Search is not configured");
+    return;
+  }
+
+  for (let attempt = 1; attempt <= INDEX_RETRY_ATTEMPTS; attempt++) {
+    try {
+      await aiSearch.indexDocument({
+        documentId: document.id,
+        filename: `${document.repoOwner}/${document.repoName}/${document.id}.txt`,
+        content: document.content,
+        attributes: {
+          repo_owner: document.repoOwner,
+          repo_name: document.repoName,
+          source_type: document.sourceType,
+          tags: document.tags ?? [],
+          title: document.title,
+          created_at: document.createdAt,
+        },
+      });
+
+      await store.markIndexed(owner, name, documentId, Date.now());
+      logger.info("repo.context_document_indexed", {
+        event: "repo.context_document_indexed",
+        repo_owner: owner.toLowerCase(),
+        repo_name: name.toLowerCase(),
+        document_id: documentId,
+        attempt,
+        request_id: correlation.requestId,
+        trace_id: correlation.traceId,
+      });
+      return;
+    } catch (error) {
+      const message =
+        error instanceof CloudflareAiSearchError
+          ? `${error.message}${error.details ? `: ${error.details}` : ""}`
+          : error instanceof Error
+            ? error.message
+            : String(error);
+
+      logger.warn("repo.context_document_index_attempt_failed", {
+        event: "repo.context_document_index_attempt_failed",
+        repo_owner: owner.toLowerCase(),
+        repo_name: name.toLowerCase(),
+        document_id: documentId,
+        attempt,
+        error: message,
+        request_id: correlation.requestId,
+        trace_id: correlation.traceId,
+      });
+
+      const shouldRetry = attempt < INDEX_RETRY_ATTEMPTS && isRetryableError(error);
+      if (shouldRetry) {
+        await sleep(RETRY_DELAY_MS);
+        continue;
+      }
+
+      await store.markIndexFailed(owner, name, documentId, message.slice(0, 1000));
+      return;
+    }
+  }
 }
 
 async function resolveRepoOrError(
@@ -136,6 +230,25 @@ async function handleUpsertContextDocument(
       trace_id: ctx.trace_id,
     });
 
+    if (doc.ingestStatus === "pending_index") {
+      const job = indexDocumentInBackground(env, owner, name, doc.id, {
+        requestId: ctx.request_id,
+        traceId: ctx.trace_id,
+      }).catch((error) => {
+        logger.error("repo.context_document_index_job_failed", {
+          event: "repo.context_document_index_job_failed",
+          repo_owner: resolved.repoOwner,
+          repo_name: resolved.repoName,
+          document_id: doc.id,
+          error: error instanceof Error ? error.message : String(error),
+          request_id: ctx.request_id,
+          trace_id: ctx.trace_id,
+        });
+      });
+      if (ctx.executionCtx) ctx.executionCtx.waitUntil(job);
+      else void job;
+    }
+
     return json({
       status: "updated",
       repo: `${resolved.repoOwner}/${resolved.repoName}`,
@@ -200,7 +313,8 @@ async function handleDeleteContextDocument(
 async function handleReindexContextDocument(
   _request: Request,
   env: Env,
-  match: RegExpMatchArray
+  match: RegExpMatchArray,
+  ctx: RequestContext
 ): Promise<Response> {
   const dbError = ensureDb(env);
   if (dbError) return dbError;
@@ -221,6 +335,24 @@ async function handleReindexContextDocument(
     ingestStatus: "pending_index",
     createdBy: existing.createdBy,
   });
+
+  const job = indexDocumentInBackground(env, owner, name, id, {
+    requestId: ctx.request_id,
+    traceId: ctx.trace_id,
+  }).catch((error) => {
+    logger.error("repo.context_document_reindex_job_failed", {
+      event: "repo.context_document_reindex_job_failed",
+      repo_owner: resolved.repoOwner,
+      repo_name: resolved.repoName,
+      document_id: id,
+      error: error instanceof Error ? error.message : String(error),
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+  });
+  if (ctx.executionCtx) ctx.executionCtx.waitUntil(job);
+  else void job;
+
   return json({
     status: "queued",
     repo: `${resolved.repoOwner}/${resolved.repoName}`,

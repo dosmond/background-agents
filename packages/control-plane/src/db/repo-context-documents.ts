@@ -178,6 +178,20 @@ function lexicalScore(haystack: string, queryTokens: string[]): number {
 export class RepoContextDocumentsStore {
   constructor(private readonly db: D1Database) {}
 
+  private async getRawMetadata(
+    owner: string,
+    name: string,
+    id: string
+  ): Promise<Record<string, unknown> | undefined> {
+    const row = await this.db
+      .prepare(
+        "SELECT metadata FROM repo_context_documents WHERE repo_owner = ? AND repo_name = ? AND id = ?"
+      )
+      .bind(normalizeRepoOwner(owner), normalizeRepoName(name), id)
+      .first<{ metadata: string | null }>();
+    return parseJsonRecord(row?.metadata ?? null);
+  }
+
   private validateDocumentInput(input: {
     id: string;
     title: string;
@@ -313,6 +327,73 @@ export class RepoContextDocumentsStore {
       .bind(normalizeRepoOwner(owner), normalizeRepoName(name), id)
       .first<DocumentRow>();
     return row ? toDocumentRecord(row) : null;
+  }
+
+  async markIndexed(
+    owner: string,
+    name: string,
+    id: string,
+    indexedAt = Date.now()
+  ): Promise<RepoContextDocumentRecord | null> {
+    const existingMetadata = (await this.getRawMetadata(owner, name, id)) ?? {};
+    const metadata = {
+      ...existingMetadata,
+      indexing: {
+        status: "indexed",
+        indexedAt,
+      },
+    };
+    await this.db
+      .prepare(
+        `UPDATE repo_context_documents
+         SET ingest_status = ?, indexed_at = ?, metadata = ?, updated_at = ?
+         WHERE repo_owner = ? AND repo_name = ? AND id = ?`
+      )
+      .bind(
+        "indexed",
+        indexedAt,
+        JSON.stringify(metadata),
+        Date.now(),
+        normalizeRepoOwner(owner),
+        normalizeRepoName(name),
+        id
+      )
+      .run();
+    return this.getDocument(owner, name, id);
+  }
+
+  async markIndexFailed(
+    owner: string,
+    name: string,
+    id: string,
+    errorSummary: string
+  ): Promise<RepoContextDocumentRecord | null> {
+    const now = Date.now();
+    const existingMetadata = (await this.getRawMetadata(owner, name, id)) ?? {};
+    const metadata = {
+      ...existingMetadata,
+      indexing: {
+        status: "failed",
+        failedAt: now,
+        error: errorSummary,
+      },
+    };
+    await this.db
+      .prepare(
+        `UPDATE repo_context_documents
+         SET ingest_status = ?, metadata = ?, updated_at = ?
+         WHERE repo_owner = ? AND repo_name = ? AND id = ?`
+      )
+      .bind(
+        "failed",
+        JSON.stringify(metadata),
+        now,
+        normalizeRepoOwner(owner),
+        normalizeRepoName(name),
+        id
+      )
+      .run();
+    return this.getDocument(owner, name, id);
   }
 
   async deleteDocument(owner: string, name: string, id: string): Promise<boolean> {

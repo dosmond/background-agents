@@ -24,6 +24,13 @@ const SOURCE_TYPES: ContextDocumentSourceType[] = [
   "other",
 ];
 
+function getDocumentIndexError(document: RepoContextDocument): string | null {
+  const indexing = document.metadata?.indexing;
+  if (!indexing || typeof indexing !== "object") return null;
+  const error = (indexing as { error?: unknown }).error;
+  return typeof error === "string" && error.trim().length > 0 ? error : null;
+}
+
 export function ContextDocumentsSettings() {
   const { repos, loading: loadingRepos } = useRepos();
   const [selectedRepo, setSelectedRepo] = useState("");
@@ -137,6 +144,27 @@ export function ContextDocumentsSettings() {
       setError("Failed to search context");
     } finally {
       setSearching(false);
+    }
+  }
+
+  async function handleReindexDocument(documentId: string) {
+    if (!ready || !apiBase || !selectedRepoObj) return;
+    setError("");
+    setSuccess("");
+    try {
+      const response = await fetch(
+        `/api/repos/${selectedRepoObj.owner}/${selectedRepoObj.name}/context/documents/${encodeURIComponent(documentId)}/reindex`,
+        { method: "POST" }
+      );
+      const payload = await response.json();
+      if (!response.ok) {
+        setError(payload?.error || "Failed to queue reindex");
+        return;
+      }
+      setSuccess("Reindex queued");
+      mutate(apiBase);
+    } catch {
+      setError("Failed to queue reindex");
     }
   }
 
@@ -274,14 +302,28 @@ export function ContextDocumentsSettings() {
                         <p className="text-xs text-muted-foreground">
                           {document.sourceType} · {document.ingestStatus}
                         </p>
+                        {document.ingestStatus === "failed" && (
+                          <p className="text-[11px] text-red-500 mt-1">
+                            {getDocumentIndexError(document) || "Indexing failed"}
+                          </p>
+                        )}
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteDocument(document.id)}
-                        className="text-xs px-2 py-1 border border-border-muted text-muted-foreground hover:text-red-500 hover:border-red-300 transition"
-                      >
-                        Delete
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleReindexDocument(document.id)}
+                          className="text-xs px-2 py-1 border border-border-muted text-muted-foreground hover:text-foreground hover:border-foreground/30 transition"
+                        >
+                          Reindex
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteDocument(document.id)}
+                          className="text-xs px-2 py-1 border border-border-muted text-muted-foreground hover:text-red-500 hover:border-red-300 transition"
+                        >
+                          Delete
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}

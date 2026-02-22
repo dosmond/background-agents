@@ -151,6 +151,7 @@ module "control_plane_worker" {
     { name = "DEPLOYMENT_NAME", value = var.deployment_name },
     { name = "CLOUDFLARE_AI_SEARCH_AUTORAG_NAME", value = var.cloudflare_ai_search_autorag_name },
     { name = "CONTEXT_RETRIEVAL_ENABLED", value = tostring(var.context_retrieval_enabled) },
+    { name = "CONTEXT_INDEXING_ENABLED", value = tostring(var.context_indexing_enabled) },
   ]
 
   secrets = [

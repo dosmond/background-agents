@@ -42,6 +42,7 @@ export interface Env {
   CLOUDFLARE_AI_SEARCH_API_TOKEN?: string; // API token for Cloudflare AI Search (AutoRAG)
   CLOUDFLARE_AI_SEARCH_AUTORAG_NAME?: string; // AutoRAG instance name
   CONTEXT_RETRIEVAL_ENABLED?: string; // Feature flag: "true" | "false"
+  CONTEXT_INDEXING_ENABLED?: string; // Feature flag: "true" | "false"
 
   // Sandbox lifecycle configuration
   SANDBOX_INACTIVITY_TIMEOUT_MS?: string; // Inactivity timeout in ms (default: 600000 = 10 min)

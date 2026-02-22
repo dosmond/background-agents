@@ -71,6 +71,12 @@ variable "context_retrieval_enabled" {
   default     = false
 }
 
+variable "context_indexing_enabled" {
+  description = "Enable async context indexing into Cloudflare AI Search"
+  type        = bool
+  default     = true
+}
+
 # =============================================================================
 # GitHub OAuth App Credentials
 # =============================================================================
