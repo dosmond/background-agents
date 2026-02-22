@@ -132,3 +132,38 @@ export function buildCommentActionPrompt(params: {
 
 ${buildCommentGuidelines(isPublic)}`;
 }
+
+export function buildIssueActionPrompt(params: {
+  owner: string;
+  repo: string;
+  number: number;
+  title: string;
+  body: string | null;
+  commentBody: string;
+  commenter: string;
+}): string {
+  const { owner, repo, number, title, body, commentBody, commenter } = params;
+
+  return `You are working on GitHub Issue #${number} in ${owner}/${repo}.
+
+## Issue Details
+- **Title**: ${title}
+- **Description**:
+${body ?? "_No description provided._"}
+
+## Request
+@${commenter} says: "${commentBody}"
+
+## Instructions
+1. Understand the issue and inspect the repository for the relevant code paths
+2. Create a new branch from the default branch for this fix
+3. Implement the fix and add/adjust tests as needed
+4. Commit your changes and push the branch
+5. Open a pull request that references this issue (for example, include "Fixes #${number}" in the PR body)
+6. Post a summary comment on the issue that includes:
+   - what you changed
+   - the PR link
+   - any caveats or follow-up items
+
+Use the GitHub CLI for repository and PR operations.`;
+}

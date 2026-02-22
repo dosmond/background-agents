@@ -7,9 +7,11 @@ import type {
 } from "./types";
 import type { Logger } from "./logger";
 import { generateInstallationToken, postReaction, checkSenderPermission } from "./github-auth";
-import { buildCodeReviewPrompt, buildCommentActionPrompt } from "./prompts";
+import { buildCodeReviewPrompt, buildCommentActionPrompt, buildIssueActionPrompt } from "./prompts";
 import { generateInternalToken } from "./utils/internal";
 import { getGitHubConfig, type ResolvedGitHubConfig } from "./utils/integration-config";
+
+const ISSUE_MENTION_DEFAULT_MODEL = "openai/gpt-5.3-codex";
 
 async function getAuthHeaders(env: Env, traceId: string): Promise<Record<string, string>> {
   const token = await generateInternalToken(env.INTERNAL_CALLBACK_SECRET);
@@ -321,11 +323,6 @@ export async function handleIssueComment(
   const repoName = repo.name;
   const repoFullName = `${owner}/${repoName}`.toLowerCase();
 
-  if (!issue.pull_request) {
-    log.debug("handler.not_a_pr", { trace_id: traceId, issue_number: issue.number });
-    return;
-  }
-
   if (!comment.body.toLowerCase().includes(`@${env.GITHUB_BOT_USERNAME.toLowerCase()}`)) {
     log.debug("handler.no_mention", {
       trace_id: traceId,
@@ -361,8 +358,14 @@ export async function handleIssueComment(
   const { ghToken, headers } = gating;
 
   const commentBody = stripMention(comment.body, env.GITHUB_BOT_USERNAME);
+  const isPullRequestComment = Boolean(issue.pull_request);
 
-  const meta = { trace_id: traceId, repo: repoFullName, pull_number: issue.number };
+  const meta = {
+    trace_id: traceId,
+    repo: repoFullName,
+    issue_number: issue.number,
+    is_pull_request_comment: isPullRequestComment,
+  };
   fireAndForgetReaction(
     log,
     ghToken,
@@ -370,24 +373,42 @@ export async function handleIssueComment(
     meta
   );
 
+  const model = config.model === env.DEFAULT_MODEL ? ISSUE_MENTION_DEFAULT_MODEL : config.model;
+
   const sessionId = await createSession(env.CONTROL_PLANE, headers, {
     repoOwner: owner,
     repoName,
-    title: `GitHub: PR #${issue.number} comment`,
-    model: config.model,
+    title: isPullRequestComment
+      ? `GitHub: PR #${issue.number} comment`
+      : `GitHub: Issue #${issue.number} mention`,
+    model,
     reasoningEffort: config.reasoningEffort,
   });
-  log.info("session.created", { ...meta, session_id: sessionId, action: "comment" });
-
-  const prompt = buildCommentActionPrompt({
-    owner,
-    repo: repoName,
-    number: issue.number,
-    title: issue.title,
-    commentBody,
-    commenter: sender.login,
-    isPublic: !repo.private,
+  log.info("session.created", {
+    ...meta,
+    session_id: sessionId,
+    action: isPullRequestComment ? "comment" : "issue_comment",
   });
+
+  const prompt = isPullRequestComment
+    ? buildCommentActionPrompt({
+        owner,
+        repo: repoName,
+        number: issue.number,
+        title: issue.title,
+        commentBody,
+        commenter: sender.login,
+        isPublic: !repo.private,
+      })
+    : buildIssueActionPrompt({
+        owner,
+        repo: repoName,
+        number: issue.number,
+        title: issue.title,
+        body: issue.body,
+        commentBody,
+        commenter: sender.login,
+      });
 
   const messageId = await sendPrompt(env.CONTROL_PLANE, headers, sessionId, {
     content: prompt,

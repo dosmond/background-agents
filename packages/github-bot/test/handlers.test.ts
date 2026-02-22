@@ -124,6 +124,7 @@ const issueCommentPayload: IssueCommentPayload = {
   issue: {
     number: 42,
     title: "Add caching",
+    body: "The API intermittently throws when cache misses happen.",
     pull_request: { url: "https://api.github.com/repos/acme/widgets/pulls/42" },
   },
   comment: {
@@ -422,18 +423,42 @@ describe("handleIssueComment", () => {
     expect(promptBody.authorId).toBe("github:bob");
   });
 
-  it("returns early if not a PR", async () => {
+  it("creates issue session for non-PR issue comments with @mention", async () => {
     const env = createMockEnv();
     const log = createMockLogger();
     const payload: IssueCommentPayload = {
       ...issueCommentPayload,
-      issue: { number: 42, title: "Bug report", pull_request: undefined },
+      issue: {
+        number: 42,
+        title: "Bug report",
+        body: "Stack trace in production",
+        pull_request: undefined,
+      },
     };
 
     await handleIssueComment(env, log, payload, "trace-2");
 
-    expect(generateInstallationToken).not.toHaveBeenCalled();
-    expect(log.debug).toHaveBeenCalledWith("handler.not_a_pr", expect.anything());
+    expect(postReaction).toHaveBeenCalledWith(
+      "test-installation-token",
+      "https://api.github.com/repos/acme/widgets/issues/comments/100/reactions",
+      "eyes"
+    );
+
+    const cpFetch = getControlPlaneFetch(env);
+    expect(cpFetch).toHaveBeenCalledTimes(2);
+
+    const sessionBody = JSON.parse(cpFetch.mock.calls[0][1].body);
+    expect(sessionBody.title).toContain("Issue #42 mention");
+    expect(sessionBody.model).toBe("openai/gpt-5.3-codex");
+
+    const promptBody = JSON.parse(cpFetch.mock.calls[1][1].body);
+    expect(promptBody.content).toContain("GitHub Issue #42");
+    expect(promptBody.content).toContain("Fixes #42");
+
+    expect(log.info).toHaveBeenCalledWith(
+      "session.created",
+      expect.objectContaining({ action: "issue_comment" })
+    );
   });
 
   it("returns early if no @mention", async () => {
@@ -475,6 +500,25 @@ describe("handleIssueComment", () => {
 
     expect(getControlPlaneFetch(env)).not.toHaveBeenCalled();
     expect(log.debug).toHaveBeenCalledWith("handler.repo_not_enabled", expect.anything());
+  });
+
+  it("uses configured model for issue comments when repo override exists", async () => {
+    vi.mocked(getGitHubConfig).mockResolvedValue({
+      ...defaultConfig,
+      model: "anthropic/claude-opus-4-6",
+    });
+    const env = createMockEnv();
+    const log = createMockLogger();
+    const payload: IssueCommentPayload = {
+      ...issueCommentPayload,
+      issue: { ...issueCommentPayload.issue, pull_request: undefined },
+    };
+
+    await handleIssueComment(env, log, payload, "trace-issue-model");
+
+    const cpFetch = getControlPlaneFetch(env);
+    const sessionBody = JSON.parse(cpFetch.mock.calls[0][1].body);
+    expect(sessionBody.model).toBe("anthropic/claude-opus-4-6");
   });
 });
 

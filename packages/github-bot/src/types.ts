@@ -73,6 +73,7 @@ export interface IssueCommentPayload {
   issue: {
     number: number;
     title: string;
+    body: string | null;
     pull_request?: { url: string };
   };
   comment: {

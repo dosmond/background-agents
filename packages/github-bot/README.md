@@ -5,8 +5,9 @@ sessions. It provides two capabilities:
 
 1. **Code Review** — Assign the bot as a PR reviewer; it performs an automated code review and
    submits structured feedback.
-2. **Comment-Triggered Actions** — @mention the bot in a PR comment; it reads the PR context and
-   executes the requested action (typically making code changes and pushing commits).
+2. **Comment-Triggered Actions** — @mention the bot in a PR comment or issue comment; it reads the
+   available context and executes the requested action (typically making code changes and pushing
+   commits).
 
 The bot is a **webhook-to-session translator** — it verifies webhooks, posts an acknowledgment
 reaction, creates a session via the control plane, and sends a prompt. The agent in the sandbox
@@ -91,12 +92,12 @@ For the agent to interact with GitHub from the sandbox, two prerequisites must b
 
 ## Webhook Events
 
-| Event                         | Action             | Trigger                     | Handler                   |
-| ----------------------------- | ------------------ | --------------------------- | ------------------------- |
-| `pull_request`                | `opened`           | Non-draft PR opened         | `handlePullRequestOpened` |
-| `pull_request`                | `review_requested` | Bot assigned as reviewer    | `handleReviewRequested`   |
-| `issue_comment`               | `created`          | @mention in a PR comment    | `handleIssueComment`      |
-| `pull_request_review_comment` | `created`          | @mention in a review thread | `handleReviewComment`     |
+| Event                         | Action             | Trigger                      | Handler                   |
+| ----------------------------- | ------------------ | ---------------------------- | ------------------------- |
+| `pull_request`                | `opened`           | Non-draft PR opened          | `handlePullRequestOpened` |
+| `pull_request`                | `review_requested` | Bot assigned as reviewer     | `handleReviewRequested`   |
+| `issue_comment`               | `created`          | @mention in issue/PR comment | `handleIssueComment`      |
+| `pull_request_review_comment` | `created`          | @mention in a review thread  | `handleReviewComment`     |
 
 All events are processed asynchronously via `executionCtx.waitUntil()`. The webhook endpoint returns
 200 immediately after signature verification.
@@ -118,12 +119,21 @@ All events are processed asynchronously via `executionCtx.waitUntil()`. The webh
 3. Create session via control plane
 4. Send code review prompt (includes PR metadata + `gh` CLI instructions)
 
-**Issue Comment:**
+**Issue Comment (PR comment):**
 
-1. Check `issue.pull_request` exists — ignore non-PR comments
+1. Check `issue.pull_request` exists
 2. Check comment body contains `@{GITHUB_BOT_USERNAME}` — ignore if no mention
 3. Check `sender.login !== GITHUB_BOT_USERNAME` — prevent loops
 4. Strip @mention, post eyes reaction, create session, send comment action prompt
+
+**Issue Comment (non-PR issue):**
+
+1. Check `issue.pull_request` is absent (normal issue comment)
+2. Check comment body contains `@{GITHUB_BOT_USERNAME}` — ignore if no mention
+3. Check `sender.login !== GITHUB_BOT_USERNAME` — prevent loops
+4. Strip @mention, post eyes reaction, create session, send issue action prompt
+5. By default, sessions use **Codex 5.3** (`openai/gpt-5.3-codex`) for this issue flow unless a
+   repo-specific model override is configured
 
 **Review Comment:** Same as issue comment, but the prompt additionally includes `filePath`,
 `diffHunk`, and `commentId` for thread-specific context and reply threading.
@@ -157,7 +167,7 @@ mechanism as the Slack bot). The token is sent as a `Bearer` token in the `Autho
 
 ## Prompt Construction
 
-Two prompt templates in `src/prompts.ts`:
+Three prompt templates in `src/prompts.ts`:
 
 **`buildCodeReviewPrompt`** — Includes PR title, body, author, branches, and instructions to:
 
@@ -172,6 +182,14 @@ instructions to:
 - Make code changes and push, or respond with analysis
 - Post a summary comment via `gh api .../issues/{n}/comments`
 - Reply to a specific review thread (when `commentId` is present)
+
+**`buildIssueActionPrompt`** — Includes issue metadata and the user's request, then instructs the
+agent to:
+
+- Create a fix branch from the default branch
+- Implement the requested changes and push commits
+- Open a PR that references the issue (e.g., `Fixes #123`)
+- Post a summary comment back on the issue with the PR link
 
 The prompts embed only metadata from the webhook payload. The agent gathers everything else.
 

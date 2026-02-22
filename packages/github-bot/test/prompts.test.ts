@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { buildCodeReviewPrompt, buildCommentActionPrompt } from "../src/prompts";
+import {
+  buildCodeReviewPrompt,
+  buildCommentActionPrompt,
+  buildIssueActionPrompt,
+} from "../src/prompts";
 
 describe("buildCodeReviewPrompt", () => {
   const baseParams = {
@@ -119,5 +123,40 @@ describe("buildCommentActionPrompt", () => {
   it("includes summary comment instruction with correct repo path", () => {
     const prompt = buildCommentActionPrompt(baseParams);
     expect(prompt).toContain("repos/acme/widgets/issues/42/comments");
+  });
+});
+
+describe("buildIssueActionPrompt", () => {
+  const baseParams = {
+    owner: "acme",
+    repo: "widgets",
+    number: 99,
+    title: "Crash on cache miss",
+    body: "When key is missing we throw unexpectedly.",
+    commentBody: "please fix this and send a PR",
+    commenter: "dana",
+  };
+
+  it("includes issue metadata and request details", () => {
+    const prompt = buildIssueActionPrompt(baseParams);
+    expect(prompt).toContain("GitHub Issue #99");
+    expect(prompt).toContain("acme/widgets");
+    expect(prompt).toContain("Crash on cache miss");
+    expect(prompt).toContain("When key is missing we throw unexpectedly.");
+    expect(prompt).toContain('@dana says: "please fix this and send a PR"');
+  });
+
+  it("includes fix-and-pr default instructions and issue reference", () => {
+    const prompt = buildIssueActionPrompt(baseParams);
+    expect(prompt).toContain("Create a new branch from the default branch");
+    expect(prompt).toContain("Open a pull request that references this issue");
+    expect(prompt).toContain("Fixes #99");
+    expect(prompt).toContain("Post a summary comment on the issue");
+  });
+
+  it("handles null issue body gracefully", () => {
+    const prompt = buildIssueActionPrompt({ ...baseParams, body: null });
+    expect(prompt).toContain("_No description provided._");
+    expect(prompt).not.toContain("null");
   });
 });
