@@ -29,6 +29,10 @@ export interface SessionRow {
   opencode_session_id: string | null;
   model: string; // LLM model to use (e.g., "anthropic/claude-haiku-4-5")
   reasoning_effort: string | null; // Reasoning effort level (e.g., "high", "max")
+  pending_question_id: string | null;
+  pending_question_message_id: string | null;
+  pending_question_data: string | null; // JSON payload of clarifying question
+  pending_question_answered_at: number | null;
   status: SessionStatus;
   created_at: number;
   updated_at: number;
@@ -57,6 +61,7 @@ export interface MessageRow {
   source: MessageSource;
   model: string | null; // LLM model for per-message override
   reasoning_effort: string | null; // Reasoning effort for per-message override
+  command: string | null; // JSON command metadata for slash commands
   attachments: string | null; // JSON
   callback_context: string | null; // JSON: { channel, threadTs, repoFullName, model }
   status: MessageStatus;
@@ -68,7 +73,7 @@ export interface MessageRow {
 
 export interface EventRow {
   id: string;
-  type: EventType;
+  type: EventType | string;
   data: string; // JSON
   message_id: string | null;
   created_at: number;
@@ -117,6 +122,10 @@ export interface PromptCommand {
     url?: string;
     content?: string;
   }>;
+  command?: {
+    name: string;
+    raw: string;
+  };
 }
 
 export interface StopCommand {
@@ -131,7 +140,20 @@ export interface ShutdownCommand {
   type: "shutdown";
 }
 
-export type SandboxCommand = PromptCommand | StopCommand | SnapshotCommand | ShutdownCommand;
+export interface ClarifyingAnswerCommand {
+  type: "clarifying_answer";
+  questionId: string;
+  messageId: string;
+  selectedOptionIds: string[];
+  otherText?: string;
+}
+
+export type SandboxCommand =
+  | PromptCommand
+  | StopCommand
+  | SnapshotCommand
+  | ShutdownCommand
+  | ClarifyingAnswerCommand;
 
 // Internal session update types
 

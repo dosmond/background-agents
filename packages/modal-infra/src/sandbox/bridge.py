@@ -496,9 +496,36 @@ class AgentBridge:
             self.git_sync_complete.set()
         elif cmd_type == "push":
             await self._handle_push(cmd)
+        elif cmd_type == "clarifying_answer":
+            await self._handle_clarifying_answer(cmd)
         else:
             self.log.debug("bridge.unknown_command", cmd_type=cmd_type)
         return None
+
+    async def _handle_clarifying_answer(self, cmd: dict[str, Any]) -> None:
+        """Handle a user answer to a clarifying question.
+
+        We continue the active reasoning by sending the answer back as follow-up
+        prompt content tied to the same message id.
+        """
+        message_id = cmd.get("messageId") or cmd.get("message_id", "unknown")
+        selected_option_ids = cmd.get("selectedOptionIds") or []
+        other_text = (cmd.get("otherText") or "").strip()
+
+        selected_label = ", ".join(str(option_id) for option_id in selected_option_ids)
+        answer_parts = []
+        if selected_label:
+            answer_parts.append(f"selected options: {selected_label}")
+        if other_text:
+            answer_parts.append(f"other text: {other_text}")
+        answer_summary = "; ".join(answer_parts) if answer_parts else "no explicit answer provided"
+
+        follow_up_cmd = {
+            "type": "prompt",
+            "messageId": message_id,
+            "content": f"User answered clarifying question: {answer_summary}",
+        }
+        await self._handle_prompt(follow_up_cmd)
 
     async def _handle_prompt(self, cmd: dict[str, Any]) -> None:
         """Handle prompt command - send to OpenCode and stream response."""

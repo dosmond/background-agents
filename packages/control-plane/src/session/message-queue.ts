@@ -20,6 +20,7 @@ interface PromptMessageData {
   model?: string;
   reasoningEffort?: string;
   attachments?: Array<{ type: string; name: string; url?: string; content?: string }>;
+  command?: { name: string; raw: string };
 }
 
 interface MessageQueueDeps {
@@ -42,6 +43,18 @@ interface MessageQueueDeps {
 export class SessionMessageQueue {
   constructor(private readonly deps: MessageQueueDeps) {}
 
+  private getProcessingStatusMessage(): Extract<ServerMessage, { type: "processing_status" }> {
+    const pendingQuestion = this.deps.repository.getPendingQuestion();
+    const blockedReason =
+      pendingQuestion?.pending_question_id != null ? "awaiting_user_answer" : undefined;
+    return {
+      type: "processing_status",
+      isProcessing: this.deps.repository.getProcessingMessage() !== null,
+      blockedReason,
+      pendingQuestionId: pendingQuestion?.pending_question_id ?? undefined,
+    };
+  }
+
   async handlePromptMessage(ws: WebSocket, data: PromptMessageData): Promise<void> {
     const client = this.deps.getClientInfo(ws);
     if (!client) {
@@ -49,6 +62,16 @@ export class SessionMessageQueue {
         type: "error",
         code: "NOT_SUBSCRIBED",
         message: "Must subscribe first",
+      });
+      return;
+    }
+
+    const pendingQuestion = this.deps.repository.getPendingQuestion();
+    if (pendingQuestion?.pending_question_id) {
+      this.deps.wsManager.send(ws, {
+        type: "error",
+        code: "AWAITING_QUESTION_ANSWER",
+        message: "Answer the pending clarifying question before sending another prompt",
       });
       return;
     }
@@ -83,6 +106,7 @@ export class SessionMessageQueue {
       source: "web",
       model: messageModel,
       reasoningEffort: messageReasoningEffort,
+      command: data.command ? JSON.stringify(data.command) : null,
       attachments: data.attachments ? JSON.stringify(data.attachments) : null,
       status: "pending",
       createdAt: now,
@@ -149,7 +173,7 @@ export class SessionMessageQueue {
     }
 
     this.deps.repository.updateMessageToProcessing(message.id, now);
-    this.deps.broadcast({ type: "processing_status", isProcessing: true });
+    this.deps.broadcast(this.getProcessingStatusMessage());
     this.deps.updateLastActivity(now);
 
     if (this.deps.scheduleExecutionTimeout) {
@@ -176,6 +200,7 @@ export class SessionMessageQueue {
         githubEmail: author?.github_email ?? null,
       },
       attachments: message.attachments ? JSON.parse(message.attachments) : undefined,
+      command: message.command ? JSON.parse(message.command) : undefined,
     };
 
     const sent = this.deps.wsManager.send(sandboxWs, command);
@@ -230,7 +255,8 @@ export class SessionMessageQueue {
       );
     }
 
-    this.deps.broadcast({ type: "processing_status", isProcessing: false });
+    this.deps.repository.resetPendingQuestion(now);
+    this.deps.broadcast(this.getProcessingStatusMessage());
 
     const sandboxWs = this.deps.wsManager.getSandboxSocket();
     if (sandboxWs) {
@@ -261,7 +287,8 @@ export class SessionMessageQueue {
     };
     this.deps.repository.upsertExecutionCompleteEvent(processingMessage.id, syntheticEvent, now);
     this.deps.broadcast({ type: "sandbox_event", event: syntheticEvent });
-    this.deps.broadcast({ type: "processing_status", isProcessing: false });
+    this.deps.repository.resetPendingQuestion(now);
+    this.deps.broadcast(this.getProcessingStatusMessage());
     this.deps.ctx.waitUntil(this.deps.callbackService.notifyComplete(processingMessage.id, false));
   }
 
@@ -301,6 +328,11 @@ export class SessionMessageQueue {
     attachments?: Array<{ type: string; name: string; url?: string }>;
     callbackContext?: Record<string, unknown>;
   }): Promise<{ messageId: string; status: "queued" }> {
+    const pendingQuestion = this.deps.repository.getPendingQuestion();
+    if (pendingQuestion?.pending_question_id) {
+      throw new Error("Session is waiting for clarifying question answer");
+    }
+
     let participant = this.deps.participantService.getByUserId(data.authorId);
     if (!participant) {
       participant = this.deps.participantService.create(data.authorId, data.authorId);
@@ -359,5 +391,9 @@ export class SessionMessageQueue {
     await this.processMessageQueue();
 
     return { messageId, status: "queued" };
+  }
+
+  getCurrentProcessingStatus(): Extract<ServerMessage, { type: "processing_status" }> {
+    return this.getProcessingStatusMessage();
   }
 }

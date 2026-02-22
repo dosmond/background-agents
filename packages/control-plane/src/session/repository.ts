@@ -118,6 +118,7 @@ export interface CreateMessageData {
   source: MessageSource;
   model?: string | null;
   reasoningEffort?: string | null;
+  command?: string | null;
   attachments?: string | null;
   callbackContext?: string | null;
   status: MessageStatus;
@@ -135,6 +136,15 @@ export interface CreateEventData {
   data: string;
   messageId: string | null;
   createdAt: number;
+}
+
+export interface PendingQuestionData {
+  questionId: string;
+  messageId: string;
+  prompt: string;
+  mode: "single" | "multi";
+  options: Array<{ id: string; label: string; allowOther?: boolean }>;
+  required: true;
 }
 
 /**
@@ -258,6 +268,68 @@ export class SessionRepository {
       updatedAt,
       sessionId
     );
+  }
+
+  setPendingQuestion(question: PendingQuestionData, updatedAt: number): void {
+    this.sql.exec(
+      `UPDATE session
+       SET pending_question_id = ?,
+           pending_question_message_id = ?,
+           pending_question_data = ?,
+           pending_question_answered_at = NULL,
+           updated_at = ?
+       WHERE id = (SELECT id FROM session LIMIT 1)`,
+      question.questionId,
+      question.messageId,
+      JSON.stringify(question),
+      updatedAt
+    );
+  }
+
+  clearPendingQuestion(answeredAt: number, updatedAt: number): void {
+    this.sql.exec(
+      `UPDATE session
+       SET pending_question_id = NULL,
+           pending_question_message_id = NULL,
+           pending_question_data = NULL,
+           pending_question_answered_at = ?,
+           updated_at = ?
+       WHERE id = (SELECT id FROM session LIMIT 1)`,
+      answeredAt,
+      updatedAt
+    );
+  }
+
+  resetPendingQuestion(updatedAt: number): void {
+    this.sql.exec(
+      `UPDATE session
+       SET pending_question_id = NULL,
+           pending_question_message_id = NULL,
+           pending_question_data = NULL,
+           pending_question_answered_at = NULL,
+           updated_at = ?
+       WHERE id = (SELECT id FROM session LIMIT 1)`,
+      updatedAt
+    );
+  }
+
+  getPendingQuestion(): {
+    pending_question_id: string | null;
+    pending_question_message_id: string | null;
+    pending_question_data: string | null;
+    pending_question_answered_at: number | null;
+  } | null {
+    const result = this.sql.exec(
+      `SELECT pending_question_id, pending_question_message_id, pending_question_data, pending_question_answered_at
+       FROM session LIMIT 1`
+    );
+    const rows = result.toArray() as Array<{
+      pending_question_id: string | null;
+      pending_question_message_id: string | null;
+      pending_question_data: string | null;
+      pending_question_answered_at: number | null;
+    }>;
+    return rows[0] ?? null;
   }
 
   // === SANDBOX ===
@@ -514,14 +586,15 @@ export class SessionRepository {
 
   createMessage(data: CreateMessageData): void {
     this.sql.exec(
-      `INSERT INTO messages (id, author_id, content, source, model, reasoning_effort, attachments, callback_context, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO messages (id, author_id, content, source, model, reasoning_effort, command, attachments, callback_context, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       data.id,
       data.authorId,
       data.content,
       data.source,
       data.model ?? null,
       data.reasoningEffort ?? null,
+      data.command ?? null,
       data.attachments ?? null,
       data.callbackContext ?? null,
       data.status,

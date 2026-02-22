@@ -138,6 +138,13 @@ export interface SandboxEvent {
     name: string;
     avatar?: string;
   };
+  questionId?: string;
+  prompt?: string;
+  mode?: "single" | "multi";
+  options?: Array<{ id: string; label: string; allowOther?: boolean }>;
+  required?: true;
+  selectedOptionIds?: string[];
+  otherText?: string;
 }
 
 // WebSocket message types
@@ -150,9 +157,20 @@ export type ClientMessage =
       model?: string;
       reasoningEffort?: string;
       attachments?: Attachment[];
+      command?: {
+        name: string;
+        raw: string;
+      };
     }
   | { type: "stop" }
   | { type: "typing" }
+  | {
+      type: "answer_clarifying_question";
+      questionId: string;
+      messageId: string;
+      selectedOptionIds: string[];
+      otherText?: string;
+    }
   | { type: "presence"; status: "active" | "idle"; cursor?: { line: number; file: string } };
 
 export type ServerMessage =
@@ -193,6 +211,8 @@ export interface SessionState {
   model?: string;
   reasoningEffort?: string;
   isProcessing?: boolean;
+  blockedReason?: "awaiting_user_answer";
+  pendingQuestionId?: string;
 }
 
 // Participant presence info

@@ -28,6 +28,16 @@ export class SessionSandboxEventProcessor {
 
   constructor(private readonly deps: SessionSandboxEventProcessorDeps) {}
 
+  private buildProcessingStatus(): Extract<ServerMessage, { type: "processing_status" }> {
+    const pending = this.deps.repository.getPendingQuestion();
+    return {
+      type: "processing_status",
+      isProcessing: this.deps.getIsProcessing(),
+      blockedReason: pending?.pending_question_id ? "awaiting_user_answer" : undefined,
+      pendingQuestionId: pending?.pending_question_id ?? undefined,
+    };
+  }
+
   async processSandboxEvent(event: SandboxEvent): Promise<void> {
     if (event.type === "heartbeat" || event.type === "token") {
       this.deps.log.debug("Sandbox event", { event_type: event.type });
@@ -91,6 +101,7 @@ export class SessionSandboxEventProcessor {
     }
 
     if (event.type === "execution_complete") {
+      this.deps.repository.resetPendingQuestion(now);
       if (messageId) {
         this.deps.repository.upsertExecutionCompleteEvent(messageId, event, now);
       }
@@ -123,10 +134,7 @@ export class SessionSandboxEventProcessor {
         });
 
         this.deps.broadcast({ type: "sandbox_event", event });
-        this.deps.broadcast({
-          type: "processing_status",
-          isProcessing: this.deps.getIsProcessing(),
-        });
+        this.deps.broadcast(this.buildProcessingStatus());
         this.deps.ctx.waitUntil(
           this.deps.callbackService.notifyComplete(completionMessageId, event.success)
         );
@@ -142,6 +150,30 @@ export class SessionSandboxEventProcessor {
       this.deps.updateLastActivity(now);
       await this.deps.scheduleInactivityCheck();
       await this.deps.processMessageQueue();
+      return;
+    }
+
+    if (event.type === "clarifying_question") {
+      this.deps.repository.setPendingQuestion(
+        {
+          questionId: event.questionId,
+          messageId: event.messageId,
+          prompt: event.prompt,
+          mode: event.mode,
+          options: event.options,
+          required: true,
+        },
+        now
+      );
+      this.deps.repository.createEvent({
+        id: generateId(),
+        type: event.type,
+        data: JSON.stringify(event),
+        messageId,
+        createdAt: now,
+      });
+      this.deps.broadcast({ type: "sandbox_event", event });
+      this.deps.broadcast(this.buildProcessingStatus());
       return;
     }
 

@@ -37,6 +37,13 @@ interface SandboxEvent {
     name: string;
     avatar?: string;
   };
+  questionId?: string;
+  prompt?: string;
+  mode?: "single" | "multi";
+  options?: Array<{ id: string; label: string; allowOther?: boolean }>;
+  required?: true;
+  selectedOptionIds?: string[];
+  otherText?: string;
 }
 
 interface SessionState {
@@ -52,6 +59,8 @@ interface SessionState {
   model?: string;
   reasoningEffort?: string;
   isProcessing: boolean;
+  blockedReason?: "awaiting_user_answer";
+  pendingQuestionId?: string;
 }
 
 interface Participant {
@@ -78,7 +87,18 @@ interface UseSessionSocketReturn {
   isProcessing: boolean;
   hasMoreHistory: boolean;
   loadingHistory: boolean;
-  sendPrompt: (content: string, model?: string, reasoningEffort?: string) => void;
+  sendPrompt: (
+    content: string,
+    model?: string,
+    reasoningEffort?: string,
+    command?: { name: string; raw: string }
+  ) => void;
+  submitClarifyingAnswer: (input: {
+    questionId: string;
+    messageId: string;
+    selectedOptionIds: string[];
+    otherText?: string;
+  }) => void;
   stopExecution: () => void;
   sendTyping: () => void;
   reconnect: () => void;
@@ -209,6 +229,8 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
       participantId?: string;
       participant?: { participantId: string; name: string; avatar?: string };
       isProcessing?: boolean;
+      blockedReason?: "awaiting_user_answer";
+      pendingQuestionId?: string;
       hasMore?: boolean;
       cursor?: { timestamp: number; id: string } | null;
       replay?: {
@@ -349,7 +371,16 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
         case "processing_status":
           if (typeof data.isProcessing === "boolean") {
             const isProcessing = data.isProcessing;
-            setSessionState((prev) => (prev ? { ...prev, isProcessing } : null));
+            setSessionState((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    isProcessing,
+                    blockedReason: data.blockedReason,
+                    pendingQuestionId: data.pendingQuestionId,
+                  }
+                : null
+            );
           }
           break;
 
@@ -520,38 +551,70 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
     };
   }, [sessionId, handleMessage, fetchWsToken]);
 
-  const sendPrompt = useCallback((content: string, model?: string, reasoningEffort?: string) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      console.error("WebSocket not connected");
-      return;
-    }
+  const sendPrompt = useCallback(
+    (
+      content: string,
+      model?: string,
+      reasoningEffort?: string,
+      command?: { name: string; raw: string }
+    ) => {
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        console.error("WebSocket not connected");
+        return;
+      }
 
-    if (!subscribedRef.current) {
-      console.error("Not subscribed yet, waiting...");
-      // Retry after a short delay
-      setTimeout(() => sendPrompt(content, model, reasoningEffort), 500);
-      return;
-    }
+      if (!subscribedRef.current) {
+        console.error("Not subscribed yet, waiting...");
+        // Retry after a short delay
+        setTimeout(() => sendPrompt(content, model, reasoningEffort, command), 500);
+        return;
+      }
 
-    console.log("Sending prompt:", content, "with model:", model, "reasoning:", reasoningEffort);
+      console.log("Sending prompt:", content, "with model:", model, "reasoning:", reasoningEffort);
 
-    // Optimistically set isProcessing for immediate feedback
-    // Server will confirm with processing_status message
-    setSessionState((prev) => (prev ? { ...prev, isProcessing: true } : null));
+      // Optimistically set isProcessing for immediate feedback
+      // Server will confirm with processing_status message
+      setSessionState((prev) => (prev ? { ...prev, isProcessing: true } : null));
 
-    // Note: user_message event is NOT inserted optimistically here.
-    // The server writes a user_message event to the events table and broadcasts it
-    // to all clients (including the sender), which handles both display and multiplayer.
+      // Note: user_message event is NOT inserted optimistically here.
+      // The server writes a user_message event to the events table and broadcasts it
+      // to all clients (including the sender), which handles both display and multiplayer.
 
-    wsRef.current.send(
-      JSON.stringify({
-        type: "prompt",
-        content,
-        model, // Include model for per-message model switching
-        reasoningEffort,
-      })
-    );
-  }, []);
+      wsRef.current.send(
+        JSON.stringify({
+          type: "prompt",
+          content,
+          model, // Include model for per-message model switching
+          reasoningEffort,
+          command,
+        })
+      );
+    },
+    []
+  );
+
+  const submitClarifyingAnswer = useCallback(
+    (input: {
+      questionId: string;
+      messageId: string;
+      selectedOptionIds: string[];
+      otherText?: string;
+    }) => {
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !subscribedRef.current) {
+        return;
+      }
+      wsRef.current.send(
+        JSON.stringify({
+          type: "answer_clarifying_question",
+          questionId: input.questionId,
+          messageId: input.messageId,
+          selectedOptionIds: input.selectedOptionIds,
+          otherText: input.otherText?.trim() || undefined,
+        })
+      );
+    },
+    []
+  );
 
   const stopExecution = useCallback(() => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
@@ -654,6 +717,7 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
     hasMoreHistory,
     loadingHistory,
     sendPrompt,
+    submitClarifyingAnswer,
     stopExecution,
     sendTyping,
     reconnect,

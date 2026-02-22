@@ -34,6 +34,7 @@ Thumbs.db
 !.env.example
 .env.local
 .env.*.local
+.secrets
 
 # Logs
 *.log
@@ -87,6 +88,8 @@ terraform.rc
 
 # Internal docs (kept locally)
 docs/internal/
+docs/brainstorms/
+docs/plans/
 
 SECURITY-AUDIT.md
 terraform/environments/production/plan.out

@@ -10,6 +10,8 @@ function createProcessor() {
     createEvent: vi.fn(),
     upsertExecutionCompleteEvent: vi.fn(),
     updateMessageCompletion: vi.fn(),
+    resetPendingQuestion: vi.fn(),
+    getPendingQuestion: vi.fn(() => null),
     getMessageTimestamps: vi.fn(
       () => null as { created_at: number; started_at: number | null } | null
     ),
@@ -126,7 +128,9 @@ describe("SessionSandboxEventProcessor", () => {
       expect.any(Number)
     );
     expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
-    expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
+    expect(h.broadcast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "processing_status", isProcessing: false })
+    );
     expect(h.triggerSnapshot).toHaveBeenCalledWith("execution_complete");
     expect(h.scheduleInactivityCheck).toHaveBeenCalledTimes(1);
     expect(h.processMessageQueue).toHaveBeenCalledTimes(1);

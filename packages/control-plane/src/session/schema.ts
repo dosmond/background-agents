@@ -21,6 +21,10 @@ CREATE TABLE IF NOT EXISTS session (
   opencode_session_id TEXT,                         -- OpenCode session ID (for 1:1 mapping)
   model TEXT DEFAULT 'anthropic/claude-haiku-4-5',   -- LLM model to use
   reasoning_effort TEXT,                            -- Session-level reasoning effort default
+  pending_question_id TEXT,                         -- Current blocking clarifying question id
+  pending_question_message_id TEXT,                 -- Message currently blocked on answer
+  pending_question_data TEXT,                       -- JSON payload for reconnect/hibernation restore
+  pending_question_answered_at INTEGER,             -- Timestamp of accepted answer (idempotency guard)
   status TEXT DEFAULT 'created',                    -- 'created', 'active', 'completed', 'archived'
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -53,6 +57,7 @@ CREATE TABLE IF NOT EXISTS messages (
   source TEXT NOT NULL,                             -- 'web', 'slack', 'extension', 'github'
   model TEXT,                                       -- LLM model for this specific message (per-message override)
   reasoning_effort TEXT,                            -- Per-message reasoning effort override
+  command TEXT,                                     -- JSON object for slash command metadata
   attachments TEXT,                                 -- JSON array
   callback_context TEXT,                            -- JSON callback context for Slack follow-up notifications
   status TEXT DEFAULT 'pending',                    -- 'pending', 'processing', 'completed', 'failed'
@@ -245,6 +250,31 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
     id: 18,
     description: "Add reasoning_effort to messages",
     run: `ALTER TABLE messages ADD COLUMN reasoning_effort TEXT`,
+  },
+  {
+    id: 19,
+    description: "Add pending_question_id to session",
+    run: `ALTER TABLE session ADD COLUMN pending_question_id TEXT`,
+  },
+  {
+    id: 20,
+    description: "Add pending_question_message_id to session",
+    run: `ALTER TABLE session ADD COLUMN pending_question_message_id TEXT`,
+  },
+  {
+    id: 21,
+    description: "Add pending_question_data to session",
+    run: `ALTER TABLE session ADD COLUMN pending_question_data TEXT`,
+  },
+  {
+    id: 22,
+    description: "Add pending_question_answered_at to session",
+    run: `ALTER TABLE session ADD COLUMN pending_question_answered_at INTEGER`,
+  },
+  {
+    id: 23,
+    description: "Add command metadata to messages",
+    run: `ALTER TABLE messages ADD COLUMN command TEXT`,
   },
 ];
 

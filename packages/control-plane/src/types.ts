@@ -93,9 +93,20 @@ export type ClientMessage =
       model?: string;
       reasoningEffort?: string;
       attachments?: Attachment[];
+      command?: {
+        name: string;
+        raw: string;
+      };
     }
   | { type: "stop" }
   | { type: "typing" }
+  | {
+      type: "answer_clarifying_question";
+      questionId: string;
+      messageId: string;
+      selectedOptionIds: string[];
+      otherText?: string;
+    }
   | {
       type: "presence";
       status: "active" | "idle";
@@ -138,7 +149,12 @@ export type ServerMessage =
   | { type: "sandbox_restored"; message: string }
   | { type: "sandbox_warning"; message: string }
   | { type: "session_status"; status: SessionStatus }
-  | { type: "processing_status"; isProcessing: boolean }
+  | {
+      type: "processing_status";
+      isProcessing: boolean;
+      blockedReason?: "awaiting_user_answer";
+      pendingQuestionId?: string;
+    }
   | {
       type: "history_page";
       items: SandboxEvent[];
@@ -242,6 +258,26 @@ export type SandboxEvent =
       messageId: string;
       timestamp: number;
       author?: { participantId: string; name: string; avatar?: string };
+    }
+  | {
+      type: "clarifying_question";
+      questionId: string;
+      messageId: string;
+      prompt: string;
+      mode: "single" | "multi";
+      options: Array<{ id: string; label: string; allowOther?: boolean }>;
+      required: true;
+      timestamp: number;
+      sandboxId?: string;
+    }
+  | {
+      type: "clarifying_answer";
+      questionId: string;
+      messageId: string;
+      selectedOptionIds: string[];
+      otherText?: string;
+      timestamp: number;
+      author?: { participantId: string; name: string; avatar?: string };
     };
 
 // Attachment
@@ -267,6 +303,8 @@ export interface SessionState {
   model?: string;
   reasoningEffort?: string;
   isProcessing: boolean;
+  blockedReason?: "awaiting_user_answer";
+  pendingQuestionId?: string;
 }
 
 // Participant presence

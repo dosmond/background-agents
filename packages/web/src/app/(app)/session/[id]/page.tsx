@@ -40,6 +40,8 @@ import {
 } from "@/components/ui/icons";
 import { Combobox, type ComboboxGroup } from "@/components/ui/combobox";
 
+const SUPPORTED_SLASH_COMMANDS = new Set(["plan", "explain", "debug", "refactor", "test"]);
+
 // Event grouping types
 type EventGroup =
   | { type: "tool_group"; events: SandboxEvent[]; id: string }
@@ -117,6 +119,7 @@ function SessionPageContent() {
     isProcessing,
     loadingHistory,
     sendPrompt,
+    submitClarifyingAnswer,
     stopExecution,
     sendTyping,
     reconnect,
@@ -165,6 +168,7 @@ function SessionPageContent() {
   );
 
   const [prompt, setPrompt] = useState("");
+  const [composerError, setComposerError] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<string>(DEFAULT_MODEL);
   const [reasoningEffort, setReasoningEffort] = useState<string | undefined>(
     getDefaultReasoningEffort(DEFAULT_MODEL)
@@ -203,7 +207,20 @@ function SessionPageContent() {
     e.preventDefault();
     if (!prompt.trim() || isProcessing) return;
 
-    sendPrompt(prompt, selectedModel, reasoningEffort);
+    const trimmedPrompt = prompt.trim();
+    let commandMeta: { name: string; raw: string } | undefined;
+    if (trimmedPrompt.startsWith("/")) {
+      const rawCommand = trimmedPrompt.split(/\s+/, 1)[0] ?? "";
+      const commandName = rawCommand.replace(/^\//, "");
+      if (!SUPPORTED_SLASH_COMMANDS.has(commandName)) {
+        setComposerError(`Unsupported command: ${rawCommand}`);
+        return;
+      }
+      commandMeta = { name: commandName, raw: rawCommand };
+    }
+
+    setComposerError(null);
+    sendPrompt(prompt, selectedModel, reasoningEffort, commandMeta);
     setPrompt("");
     // Revalidate sidebar so this session bubbles to the top
     mutate("/api/sessions");
@@ -220,6 +237,7 @@ function SessionPageContent() {
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setPrompt(e.target.value);
+    if (composerError) setComposerError(null);
 
     // Send typing indicator (debounced)
     if (typingTimeoutRef.current) {
@@ -255,12 +273,14 @@ function SessionPageContent() {
       setSelectedModel={handleModelChange}
       setReasoningEffort={setReasoningEffort}
       stopExecution={stopExecution}
+      submitClarifyingAnswer={submitClarifyingAnswer}
       handleArchive={handleArchive}
       handleUnarchive={handleUnarchive}
       loadingHistory={loadingHistory}
       loadOlderEvents={loadOlderEvents}
       modelOptions={enabledModelOptions}
       fallbackSessionInfo={fallbackSessionInfo}
+      composerError={composerError}
     />
   );
 }
@@ -289,12 +309,14 @@ function SessionContent({
   setSelectedModel,
   setReasoningEffort,
   stopExecution,
+  submitClarifyingAnswer,
   handleArchive,
   handleUnarchive,
   loadingHistory,
   loadOlderEvents,
   modelOptions,
   fallbackSessionInfo,
+  composerError,
 }: {
   sessionState: ReturnType<typeof useSessionSocket>["sessionState"];
   connected: boolean;
@@ -319,6 +341,7 @@ function SessionContent({
   setSelectedModel: (model: string) => void;
   setReasoningEffort: (value: string | undefined) => void;
   stopExecution: () => void;
+  submitClarifyingAnswer: ReturnType<typeof useSessionSocket>["submitClarifyingAnswer"];
   handleArchive: () => void | Promise<void>;
   handleUnarchive: () => void | Promise<void>;
   loadingHistory: boolean;
@@ -329,6 +352,7 @@ function SessionContent({
     repoName: string | null;
     title: string | null;
   };
+  composerError: string | null;
 }) {
   const { isOpen, toggle } = useSidebarContext();
   const isBelowLg = useMediaQuery("(max-width: 1023px)");
@@ -617,11 +641,17 @@ function SessionContent({
                     key={group.id}
                     event={group.event}
                     currentParticipantId={currentParticipantId}
+                    pendingQuestionId={sessionState?.pendingQuestionId}
+                    submitClarifyingAnswer={submitClarifyingAnswer}
                   />
                 )
               )
             )}
-            {isProcessing && <ThinkingIndicator />}
+            {isProcessing && (
+              <ThinkingIndicator
+                isWaitingForAnswer={sessionState?.blockedReason === "awaiting_user_answer"}
+              />
+            )}
 
             <div ref={messagesEndRef} />
           </div>
@@ -780,6 +810,11 @@ function SessionContent({
                 </button>
               </div>
             </div>
+            {composerError && (
+              <div className="px-4 pb-2 text-xs text-red-600 dark:text-red-400">
+                {composerError}
+              </div>
+            )}
 
             {/* Footer row with model selector, reasoning pills, and agent label */}
             <div className="flex flex-col gap-2 px-4 py-2 border-t border-border-muted sm:flex-row sm:items-center sm:justify-between sm:gap-0">
@@ -909,11 +944,13 @@ function CombinedStatusDot({
   );
 }
 
-function ThinkingIndicator() {
+function ThinkingIndicator({ isWaitingForAnswer = false }: { isWaitingForAnswer?: boolean }) {
   return (
     <div className="bg-card p-4 flex items-center gap-2">
       <span className="inline-block w-2 h-2 bg-accent rounded-full animate-pulse" />
-      <span className="text-sm text-muted-foreground">Thinking...</span>
+      <span className="text-sm text-muted-foreground">
+        {isWaitingForAnswer ? "Waiting for your answer..." : "Thinking..."}
+      </span>
     </div>
   );
 }
@@ -971,6 +1008,8 @@ function ParticipantsList({
 const EventItem = memo(function EventItem({
   event,
   currentParticipantId,
+  pendingQuestionId,
+  submitClarifyingAnswer,
 }: {
   event: {
     type: string;
@@ -982,6 +1021,14 @@ const EventItem = memo(function EventItem({
     success?: boolean;
     status?: string;
     timestamp: number;
+    messageId?: string;
+    questionId?: string;
+    prompt?: string;
+    mode?: "single" | "multi";
+    options?: Array<{ id: string; label: string; allowOther?: boolean }>;
+    required?: true;
+    selectedOptionIds?: string[];
+    otherText?: string;
     author?: {
       participantId: string;
       name: string;
@@ -989,10 +1036,16 @@ const EventItem = memo(function EventItem({
     };
   };
   currentParticipantId: string | null;
+  pendingQuestionId?: string;
+  submitClarifyingAnswer: ReturnType<typeof useSessionSocket>["submitClarifyingAnswer"];
 }) {
   const [copied, setCopied] = useState(false);
+  const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
+  const [otherText, setOtherText] = useState("");
+  const [questionError, setQuestionError] = useState<string | null>(null);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const time = new Date(event.timestamp * 1000).toLocaleTimeString();
+  const isPendingQuestion = !!event.questionId && event.questionId === pendingQuestionId;
 
   useEffect(() => {
     return () => {
@@ -1140,6 +1193,97 @@ const EventItem = memo(function EventItem({
           <span className="w-2 h-2 rounded-full bg-success" />
           Execution complete
           <span className="text-xs text-secondary-foreground">{time}</span>
+        </div>
+      );
+
+    case "clarifying_question": {
+      if (!event.questionId || !event.messageId || !event.prompt) return null;
+      const options = event.options ?? [];
+      const isSingle = event.mode === "single";
+      const allowsOther = options.some((option) => option.allowOther);
+
+      const toggleOption = (optionId: string) => {
+        setQuestionError(null);
+        setSelectedOptionIds((prev) => {
+          if (isSingle) return [optionId];
+          return prev.includes(optionId)
+            ? prev.filter((id) => id !== optionId)
+            : [...prev, optionId];
+        });
+      };
+
+      const onSubmit = () => {
+        const trimmedOtherText = otherText.trim();
+        if (selectedOptionIds.length === 0 && !trimmedOtherText) {
+          setQuestionError("Please select at least one option or provide Other text.");
+          return;
+        }
+        submitClarifyingAnswer({
+          questionId: event.questionId!,
+          messageId: event.messageId!,
+          selectedOptionIds,
+          otherText: trimmedOtherText || undefined,
+        });
+      };
+
+      return (
+        <div className="bg-card border border-border-muted p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-muted-foreground">Clarifying question</span>
+            <span className="text-xs text-secondary-foreground">{time}</span>
+          </div>
+          <p className="text-sm text-foreground">{event.prompt}</p>
+          <div className="space-y-2">
+            {options.map((option) => {
+              const checked = selectedOptionIds.includes(option.id);
+              return (
+                <label key={option.id} className="flex items-center gap-2 text-sm text-foreground">
+                  <input
+                    type={isSingle ? "radio" : "checkbox"}
+                    name={event.questionId}
+                    checked={checked}
+                    onChange={() => toggleOption(option.id)}
+                    disabled={!isPendingQuestion}
+                  />
+                  <span>{option.label}</span>
+                </label>
+              );
+            })}
+          </div>
+          {allowsOther && (
+            <input
+              value={otherText}
+              onChange={(e) => {
+                setQuestionError(null);
+                setOtherText(e.target.value);
+              }}
+              disabled={!isPendingQuestion}
+              className="w-full border border-border-muted px-3 py-2 text-sm bg-background"
+              placeholder="Other (optional)"
+            />
+          )}
+          {questionError && (
+            <p className="text-xs text-red-600 dark:text-red-400">{questionError}</p>
+          )}
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={onSubmit}
+              disabled={!isPendingQuestion}
+              className="px-3 py-1.5 text-sm bg-accent text-white disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isPendingQuestion ? "Submit answer" : "Answered"}
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    case "clarifying_answer":
+      return (
+        <div className="bg-accent-muted p-3 text-sm text-accent">
+          Clarifying answer submitted
+          <span className="ml-2 text-xs text-secondary-foreground">{time}</span>
         </div>
       );
 

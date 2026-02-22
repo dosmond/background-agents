@@ -37,6 +37,10 @@ function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
     opencode_session_id: null,
     model: "anthropic/claude-haiku-4-5",
     reasoning_effort: null,
+    pending_question_id: null,
+    pending_question_message_id: null,
+    pending_question_data: null,
+    pending_question_answered_at: null,
     status: "active",
     created_at: 1000,
     updated_at: 1000,
@@ -52,6 +56,7 @@ function createMessage(overrides: Partial<MessageRow> = {}): MessageRow {
     source: "web",
     model: null,
     reasoning_effort: null,
+    command: null,
     attachments: null,
     callback_context: null,
     status: "pending",
@@ -77,16 +82,23 @@ function createClientInfo(overrides: Partial<ClientInfo> = {}): ClientInfo {
 }
 
 function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | null }) {
+  let processingMessage: { id: string } | null = null;
   const repository = {
     createMessage: vi.fn(),
     createEvent: vi.fn(),
     getPendingOrProcessingCount: vi.fn(() => 1),
-    getProcessingMessage: vi.fn(() => null as { id: string } | null),
+    getPendingQuestion: vi.fn(() => null),
+    getProcessingMessage: vi.fn(() => processingMessage as { id: string } | null),
     getNextPendingMessage: vi.fn(() => null as MessageRow | null),
-    updateMessageToProcessing: vi.fn(),
+    updateMessageToProcessing: vi.fn((messageId: string) => {
+      processingMessage = { id: messageId };
+    }),
     getParticipantById: vi.fn(() => createParticipant()),
-    updateMessageCompletion: vi.fn(),
+    updateMessageCompletion: vi.fn(() => {
+      processingMessage = null;
+    }),
     upsertExecutionCompleteEvent: vi.fn(),
+    resetPendingQuestion: vi.fn(),
   };
 
   const wsManager = {
@@ -180,13 +192,17 @@ describe("SessionMessageQueue", () => {
       sandboxWs,
       expect.objectContaining({ type: "prompt", messageId: "msg-42" })
     );
-    expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: true });
+    expect(h.broadcast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "processing_status", isProcessing: true })
+    );
   });
 
   it("marks processing message failed and broadcasts synthetic completion on stop", async () => {
     const h = buildQueue();
     const sandboxWs = { readyState: WebSocket.OPEN } as WebSocket;
-    h.repository.getProcessingMessage.mockReturnValue({ id: "msg-9" });
+    h.repository.getProcessingMessage
+      .mockImplementationOnce(() => ({ id: "msg-9" }))
+      .mockImplementation(() => null);
     h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
 
     await h.queue.stopExecution();
@@ -201,7 +217,9 @@ describe("SessionMessageQueue", () => {
       expect.objectContaining({ type: "execution_complete", success: false }),
       expect.any(Number)
     );
-    expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
+    expect(h.broadcast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "processing_status", isProcessing: false })
+    );
     expect(h.wsManager.send).toHaveBeenCalledWith(sandboxWs, { type: "stop" });
     expect(h.waitUntil).toHaveBeenCalledTimes(1);
   });

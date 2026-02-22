@@ -82,6 +82,8 @@ const VALID_EVENT_TYPES = [
   "push_complete",
   "push_error",
   "user_message",
+  "clarifying_question",
+  "clarifying_answer",
 ] as const;
 
 /**
@@ -103,6 +105,7 @@ const WS_AUTH_TIMEOUT_MS = 30000; // 30 seconds
  * the client to fetch a fresh token on reconnect.
  */
 const WS_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const MAX_OTHER_TEXT_LENGTH = 2000;
 
 /**
  * Route definition for internal API endpoints.
@@ -816,6 +819,10 @@ export class SessionDO extends DurableObject<Env> {
           await this.handlePromptMessage(ws, data);
           break;
 
+        case "answer_clarifying_question":
+          await this.handleClarifyingAnswer(ws, data);
+          break;
+
         case "stop":
           await this.stopExecution();
           break;
@@ -1025,9 +1032,144 @@ export class SessionDO extends DurableObject<Env> {
       model?: string;
       reasoningEffort?: string;
       attachments?: Array<{ type: string; name: string; url?: string; content?: string }>;
+      command?: { name: string; raw: string };
     }
   ): Promise<void> {
     await this.messageQueue.handlePromptMessage(ws, data);
+  }
+
+  private async handleClarifyingAnswer(
+    ws: WebSocket,
+    data: {
+      questionId: string;
+      messageId: string;
+      selectedOptionIds: string[];
+      otherText?: string;
+    }
+  ): Promise<void> {
+    const client = this.getClientInfo(ws);
+    if (!client) {
+      this.safeSend(ws, { type: "error", code: "NOT_SUBSCRIBED", message: "Must subscribe first" });
+      return;
+    }
+
+    const pending = this.repository.getPendingQuestion();
+    if (!pending?.pending_question_id || !pending.pending_question_data) {
+      this.safeSend(ws, {
+        type: "error",
+        code: "QUESTION_STALE",
+        message: "No pending clarifying question",
+      });
+      return;
+    }
+
+    if (
+      pending.pending_question_id !== data.questionId ||
+      pending.pending_question_message_id !== data.messageId
+    ) {
+      this.safeSend(ws, {
+        type: "error",
+        code: "QUESTION_STALE",
+        message: "Question is no longer active",
+      });
+      return;
+    }
+
+    const parsedQuestion = JSON.parse(pending.pending_question_data) as {
+      questionId: string;
+      messageId: string;
+      mode: "single" | "multi";
+      options: Array<{ id: string; label: string; allowOther?: boolean }>;
+      required: true;
+    };
+
+    const selectedOptionIds = Array.isArray(data.selectedOptionIds) ? data.selectedOptionIds : [];
+    const optionIds = new Set(parsedQuestion.options.map((option) => option.id));
+    const hasInvalidSelection = selectedOptionIds.some((id) => !optionIds.has(id));
+    if (hasInvalidSelection) {
+      this.safeSend(ws, {
+        type: "error",
+        code: "INVALID_ANSWER",
+        message: "Selected options contain invalid ids",
+      });
+      return;
+    }
+
+    if (parsedQuestion.mode === "single" && selectedOptionIds.length !== 1) {
+      this.safeSend(ws, {
+        type: "error",
+        code: "INVALID_ANSWER",
+        message: "Single-choice questions require exactly one option",
+      });
+      return;
+    }
+
+    const trimmedOtherText = data.otherText?.trim();
+    const allowsOther = parsedQuestion.options.some((option) => option.allowOther);
+    if (trimmedOtherText && !allowsOther) {
+      this.safeSend(ws, {
+        type: "error",
+        code: "INVALID_ANSWER",
+        message: "This question does not allow Other text",
+      });
+      return;
+    }
+
+    if (trimmedOtherText && trimmedOtherText.length > MAX_OTHER_TEXT_LENGTH) {
+      this.safeSend(ws, {
+        type: "error",
+        code: "INVALID_ANSWER",
+        message: `Other text must be <= ${MAX_OTHER_TEXT_LENGTH} characters`,
+      });
+      return;
+    }
+
+    if (selectedOptionIds.length === 0 && !trimmedOtherText) {
+      this.safeSend(ws, {
+        type: "error",
+        code: "INVALID_ANSWER",
+        message: "Answer is required",
+      });
+      return;
+    }
+
+    const now = Date.now();
+    this.repository.clearPendingQuestion(now, now);
+
+    const answerEvent: Extract<SandboxEvent, { type: "clarifying_answer" }> = {
+      type: "clarifying_answer",
+      questionId: data.questionId,
+      messageId: data.messageId,
+      selectedOptionIds,
+      otherText: trimmedOtherText,
+      timestamp: now / 1000,
+      author: {
+        participantId: client.participantId,
+        name: client.name,
+        avatar: client.avatar,
+      },
+    };
+    this.repository.createEvent({
+      id: generateId(),
+      type: "clarifying_answer",
+      data: JSON.stringify(answerEvent),
+      messageId: data.messageId,
+      createdAt: now,
+    });
+    this.broadcast({ type: "sandbox_event", event: answerEvent });
+    this.broadcast(this.messageQueue.getCurrentProcessingStatus());
+
+    const sandboxWs = this.wsManager.getSandboxSocket();
+    if (sandboxWs) {
+      this.wsManager.send(sandboxWs, {
+        type: "clarifying_answer",
+        questionId: data.questionId,
+        messageId: data.messageId,
+        selectedOptionIds,
+        otherText: trimmedOtherText,
+      });
+    }
+    this.updateLastActivity(now);
   }
 
   /**
@@ -1196,6 +1338,8 @@ export class SessionDO extends DurableObject<Env> {
       model: session?.model ?? DEFAULT_MODEL,
       reasoningEffort: session?.reasoning_effort ?? undefined,
       isProcessing,
+      blockedReason: session?.pending_question_id ? "awaiting_user_answer" : undefined,
+      pendingQuestionId: session?.pending_question_id ?? undefined,
     };
   }
 
