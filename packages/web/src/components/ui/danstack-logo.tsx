@@ -3,6 +3,54 @@ interface DanstackLogoProps {
   title?: string;
 }
 
+export function DanstackDMark({ className, title = "Danstack" }: DanstackLogoProps) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 120 120"
+      role="img"
+      aria-label={title}
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <title>{title}</title>
+      <g
+        style={{
+          fontFamily:
+            '"Geist Mono", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+          fontWeight: 800,
+          letterSpacing: "-0.03em",
+        }}
+      >
+        <text
+          x="26"
+          y="94"
+          fontSize="92"
+          fill="none"
+          stroke="var(--accent)"
+          strokeWidth="7"
+          opacity="0.28"
+        >
+          D
+        </text>
+        <text
+          x="20"
+          y="88"
+          fontSize="92"
+          fill="none"
+          stroke="var(--accent)"
+          strokeWidth="4"
+          opacity="0.5"
+        >
+          D
+        </text>
+        <text x="14" y="82" fontSize="92" fill="var(--accent)">
+          D
+        </text>
+      </g>
+    </svg>
+  );
+}
+
 export function DanstackLogo({ className, title = "Danstack AI" }: DanstackLogoProps) {
   return (
     <svg

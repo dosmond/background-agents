@@ -8,14 +8,9 @@ import useSWR, { mutate } from "swr";
 import { formatRelativeTime, isInactiveSession } from "@/lib/time";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
 import { useIsMobile } from "@/hooks/use-media-query";
-import {
-  SidebarIcon,
-  InspectIcon,
-  PlusIcon,
-  SettingsIcon,
-  ArchiveIcon,
-} from "@/components/ui/icons";
+import { SidebarIcon, PlusIcon, SettingsIcon, ArchiveIcon } from "@/components/ui/icons";
 import { Button } from "@/components/ui/button";
+import { DanstackDMark } from "@/components/ui/danstack-logo";
 
 export interface SessionItem {
   id: string;
@@ -136,8 +131,8 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
             <SidebarIcon className="w-4 h-4" />
           </Button>
           <Link href="/" className="flex items-center gap-2">
-            <InspectIcon className="w-5 h-5" />
-            <span className="font-semibold text-foreground">Inspect</span>
+            <DanstackDMark className="w-5 h-5" />
+            <span className="font-semibold text-foreground">Danstack</span>
           </Link>
         </div>
         <div className="flex items-center gap-2">
