@@ -38,6 +38,7 @@ import { mcpRoutes } from "./routes/mcp";
 import { secretsRoutes } from "./routes/secrets";
 import { contextRoutes } from "./routes/context";
 import { userPreferencesRoutes } from "./routes/user-preferences";
+import { sessionFoldersRoutes } from "./routes/session-folders";
 
 const logger = createLogger("router");
 
@@ -409,6 +410,9 @@ const routes: Route[] = [
 
   // User preferences
   ...userPreferencesRoutes,
+
+  // Session folder preferences
+  ...sessionFoldersRoutes,
 ];
 
 /**

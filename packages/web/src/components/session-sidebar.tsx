@@ -2,15 +2,41 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState, useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useSession, signOut } from "next-auth/react";
 import useSWR, { mutate } from "swr";
-import { formatRelativeTime, isInactiveSession } from "@/lib/time";
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useDraggable,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import { CSS } from "@dnd-kit/utilities";
+import { formatRelativeTime } from "@/lib/time";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
 import { useIsMobile } from "@/hooks/use-media-query";
-import { SidebarIcon, PlusIcon, SettingsIcon, ArchiveIcon } from "@/components/ui/icons";
+import {
+  ArchiveIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  FolderIcon,
+  PlusIcon,
+  RepoIcon,
+  SettingsIcon,
+  SidebarIcon,
+} from "@/components/ui/icons";
 import { Button } from "@/components/ui/button";
 import { DanstackDMark } from "@/components/ui/danstack-logo";
+import {
+  buildGroupedSessions,
+  type SessionFoldersResponse,
+  type SessionRepoGroup,
+} from "@/lib/session-folders";
 
 export interface SessionItem {
   id: string;
@@ -44,48 +70,149 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
   const pathname = usePathname();
   const [searchQuery, setSearchQuery] = useState("");
   const [archivingIds, setArchivingIds] = useState<Set<string>>(new Set());
+  const [collapsedRepos, setCollapsedRepos] = useState<Set<string>>(new Set());
   const isMobile = useIsMobile();
 
-  const { data, isLoading: loading } = useSWR<{ sessions: SessionItem[] }>(
+  const { data, isLoading: loadingSessions } = useSWR<{ sessions: SessionItem[] }>(
     authSession ? "/api/sessions" : null
+  );
+  const { data: folderData, isLoading: loadingFolders } = useSWR<SessionFoldersResponse>(
+    authSession ? "/api/session-folders" : null
   );
   const sessions = useMemo(() => data?.sessions ?? [], [data]);
 
-  // Sort sessions by updatedAt (most recent first) and filter by search query
-  const { activeSessions, inactiveSessions } = useMemo(() => {
-    const filtered = sessions
-      .filter((session) => session.status !== "archived")
-      .filter((session) => {
-        if (!searchQuery) return true;
-        const query = searchQuery.toLowerCase();
-        const title = session.title?.toLowerCase() || "";
-        const repo = `${session.repoOwner}/${session.repoName}`.toLowerCase();
-        return title.includes(query) || repo.includes(query);
-      });
-
-    // Sort by updatedAt descending
-    const sorted = [...filtered].sort((a, b) => {
-      const aTime = a.updatedAt || a.createdAt;
-      const bTime = b.updatedAt || b.createdAt;
-      return bTime - aTime;
-    });
-
-    const active: SessionItem[] = [];
-    const inactive: SessionItem[] = [];
-
-    for (const session of sorted) {
-      const timestamp = session.updatedAt || session.createdAt;
-      if (isInactiveSession(timestamp)) {
-        inactive.push(session);
-      } else {
-        active.push(session);
-      }
-    }
-
-    return { activeSessions: active, inactiveSessions: inactive };
-  }, [sessions, searchQuery]);
+  const { activeRepoGroups, inactiveRepoGroups } = useMemo(
+    () => buildGroupedSessions(sessions, searchQuery, folderData),
+    [sessions, searchQuery, folderData]
+  );
 
   const currentSessionId = pathname?.startsWith("/session/") ? pathname.split("/")[2] : null;
+  const loading = loadingSessions || loadingFolders;
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor)
+  );
+
+  const setRepoCollapsed = (repoKey: string, collapsed: boolean) => {
+    setCollapsedRepos((previous) => {
+      const next = new Set(previous);
+      if (collapsed) {
+        next.add(repoKey);
+      } else {
+        next.delete(repoKey);
+      }
+      return next;
+    });
+  };
+
+  const mutateFolders = async () => {
+    await mutate("/api/session-folders");
+  };
+
+  const createFolder = async (repoOwner: string, repoName: string) => {
+    const name = window.prompt("Folder name");
+    if (!name?.trim()) return;
+    const response = await fetch("/api/session-folders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repoOwner, repoName, name }),
+    });
+    if (!response.ok) {
+      const data = (await response.json().catch(() => ({}))) as { error?: string };
+      window.alert(data.error || "Failed to create folder");
+      return;
+    }
+    await mutateFolders();
+  };
+
+  const renameFolder = async (folderId: string, currentName: string) => {
+    const name = window.prompt("Rename folder", currentName);
+    if (!name?.trim() || name === currentName) return;
+    const response = await fetch(`/api/session-folders/${encodeURIComponent(folderId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!response.ok) {
+      const data = (await response.json().catch(() => ({}))) as { error?: string };
+      window.alert(data.error || "Failed to rename folder");
+      return;
+    }
+    await mutateFolders();
+  };
+
+  const deleteFolder = async (folderId: string, folderName: string, sessionCount: number) => {
+    const confirmed = window.confirm(
+      sessionCount > 0
+        ? `Delete "${folderName}"? ${sessionCount} session(s) will move to Unfiled.`
+        : `Delete "${folderName}"?`
+    );
+    if (!confirmed) return;
+    const response = await fetch(`/api/session-folders/${encodeURIComponent(folderId)}`, {
+      method: "DELETE",
+    });
+    if (!response.ok) {
+      const data = (await response.json().catch(() => ({}))) as { error?: string };
+      window.alert(data.error || "Failed to delete folder");
+      return;
+    }
+    await mutateFolders();
+  };
+
+  const moveSessionToFolder = async (sessionId: string, folderId: string | null) => {
+    const previous = folderData;
+    if (previous) {
+      await mutate(
+        "/api/session-folders",
+        {
+          ...previous,
+          assignments:
+            folderId === null
+              ? previous.assignments.filter((assignment) => assignment.sessionId !== sessionId)
+              : [
+                  ...previous.assignments.filter(
+                    (assignment) => assignment.sessionId !== sessionId
+                  ),
+                  { sessionId, folderId },
+                ],
+        },
+        false
+      );
+    }
+
+    const response = await fetch(`/api/session-folders/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folderId }),
+    });
+
+    if (!response.ok) {
+      await mutateFolders();
+      const data = (await response.json().catch(() => ({}))) as { error?: string };
+      window.alert(data.error || "Failed to move session");
+      return;
+    }
+
+    await mutateFolders();
+  };
+
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over) return;
+    const activeData = active.data.current as
+      | { sessionId: string; repoKey: string; folderId: string | null }
+      | undefined;
+    const overData = over.data.current as { repoKey: string; folderId: string | null } | undefined;
+    if (!activeData || !overData) return;
+    if (activeData.repoKey !== overData.repoKey) {
+      window.alert("Sessions can only be moved within the same repository.");
+      return;
+    }
+    if (activeData.folderId === overData.folderId) return;
+    await moveSessionToFolder(activeData.sessionId, overData.folderId);
+  };
+
   const handleArchive = async (sessionId: string) => {
     const confirmed = window.confirm(
       "Archive this session? You can restore archived sessions from Settings > Data Controls."
@@ -200,45 +327,230 @@ export function SessionSidebar({ onNewSession, onToggle, onSessionSelect }: Sess
         ) : sessions.length === 0 ? (
           <div className="px-4 py-8 text-center text-sm text-muted-foreground">No sessions yet</div>
         ) : (
-          <>
-            {/* Active Sessions */}
-            {activeSessions.map((session) => (
-              <SessionListItem
-                key={session.id}
-                session={session}
-                isActive={session.id === currentSessionId}
-                isMobile={isMobile}
-                onSessionSelect={onSessionSelect}
-                onArchive={handleArchive}
-                isArchiving={archivingIds.has(session.id)}
-              />
-            ))}
-
-            {/* Inactive Divider */}
-            {inactiveSessions.length > 0 && (
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={handleDragEnd}
+          >
+            <RepoGroupList
+              repoGroups={activeRepoGroups}
+              currentSessionId={currentSessionId}
+              collapsedRepos={collapsedRepos}
+              setRepoCollapsed={setRepoCollapsed}
+              onCreateFolder={createFolder}
+              onRenameFolder={renameFolder}
+              onDeleteFolder={deleteFolder}
+              isMobile={isMobile}
+              onSessionSelect={onSessionSelect}
+              onArchive={handleArchive}
+              archivingIds={archivingIds}
+            />
+            {inactiveRepoGroups.length > 0 && (
               <>
                 <div className="px-4 py-2 mt-2">
                   <span className="text-xs font-medium text-secondary-foreground uppercase tracking-wide">
                     Inactive
                   </span>
                 </div>
-                {inactiveSessions.map((session) => (
-                  <SessionListItem
-                    key={session.id}
-                    session={session}
-                    isActive={session.id === currentSessionId}
-                    isMobile={isMobile}
-                    onSessionSelect={onSessionSelect}
-                    onArchive={handleArchive}
-                    isArchiving={archivingIds.has(session.id)}
-                  />
-                ))}
+                <RepoGroupList
+                  repoGroups={inactiveRepoGroups}
+                  currentSessionId={currentSessionId}
+                  collapsedRepos={collapsedRepos}
+                  setRepoCollapsed={setRepoCollapsed}
+                  onCreateFolder={createFolder}
+                  onRenameFolder={renameFolder}
+                  onDeleteFolder={deleteFolder}
+                  isMobile={isMobile}
+                  onSessionSelect={onSessionSelect}
+                  onArchive={handleArchive}
+                  archivingIds={archivingIds}
+                />
               </>
             )}
-          </>
+          </DndContext>
         )}
       </div>
     </aside>
+  );
+}
+
+function RepoGroupList({
+  repoGroups,
+  currentSessionId,
+  collapsedRepos,
+  setRepoCollapsed,
+  onCreateFolder,
+  onRenameFolder,
+  onDeleteFolder,
+  isMobile,
+  onSessionSelect,
+  onArchive,
+  archivingIds,
+}: {
+  repoGroups: SessionRepoGroup[];
+  currentSessionId: string | null;
+  collapsedRepos: Set<string>;
+  setRepoCollapsed: (repoKey: string, collapsed: boolean) => void;
+  onCreateFolder: (repoOwner: string, repoName: string) => Promise<void>;
+  onRenameFolder: (folderId: string, currentName: string) => Promise<void>;
+  onDeleteFolder: (folderId: string, folderName: string, sessionCount: number) => Promise<void>;
+  isMobile: boolean;
+  onSessionSelect?: () => void;
+  onArchive?: (sessionId: string) => Promise<void> | void;
+  archivingIds: Set<string>;
+}) {
+  if (repoGroups.length === 0) {
+    return null;
+  }
+
+  return (
+    <>
+      {repoGroups.map((repoGroup) => {
+        const isCollapsed = collapsedRepos.has(repoGroup.key);
+        return (
+          <div key={repoGroup.key} className="border-t border-border-muted/40 first:border-t-0">
+            <div className="flex items-center gap-1 px-3 py-2">
+              <button
+                type="button"
+                onClick={() => setRepoCollapsed(repoGroup.key, !isCollapsed)}
+                className="flex min-w-0 flex-1 items-center gap-1 text-sm text-foreground hover:text-foreground/80"
+                aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${repoGroup.key}`}
+              >
+                {isCollapsed ? (
+                  <ChevronRightIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                ) : (
+                  <ChevronDownIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                )}
+                <RepoIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span className="truncate">{repoGroup.key}</span>
+              </button>
+              <button
+                type="button"
+                className="flex h-6 w-6 items-center justify-center text-muted-foreground hover:text-foreground"
+                title="Create folder"
+                onClick={() => onCreateFolder(repoGroup.repoOwner, repoGroup.repoName)}
+              >
+                <PlusIcon className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            {!isCollapsed && (
+              <div className="pb-1">
+                <FolderSessionSection
+                  title="Unfiled"
+                  repoKey={repoGroup.key}
+                  folderId={null}
+                  sessions={repoGroup.unfiled}
+                  currentSessionId={currentSessionId}
+                  isMobile={isMobile}
+                  onSessionSelect={onSessionSelect}
+                  onArchive={onArchive}
+                  archivingIds={archivingIds}
+                />
+                {repoGroup.folders.map((folder) => (
+                  <FolderSessionSection
+                    key={folder.id}
+                    title={folder.name}
+                    repoKey={repoGroup.key}
+                    folderId={folder.id}
+                    sessions={folder.sessions}
+                    currentSessionId={currentSessionId}
+                    isMobile={isMobile}
+                    onSessionSelect={onSessionSelect}
+                    onArchive={onArchive}
+                    archivingIds={archivingIds}
+                    onRename={() => onRenameFolder(folder.id, folder.name)}
+                    onDelete={() => onDeleteFolder(folder.id, folder.name, folder.sessions.length)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+function FolderSessionSection({
+  title,
+  repoKey,
+  folderId,
+  sessions,
+  currentSessionId,
+  isMobile,
+  onSessionSelect,
+  onArchive,
+  archivingIds,
+  onRename,
+  onDelete,
+}: {
+  title: string;
+  repoKey: string;
+  folderId: string | null;
+  sessions: SessionItem[];
+  currentSessionId: string | null;
+  isMobile: boolean;
+  onSessionSelect?: () => void;
+  onArchive?: (sessionId: string) => Promise<void> | void;
+  archivingIds: Set<string>;
+  onRename?: () => void;
+  onDelete?: () => void;
+}) {
+  const droppableId = folderId ? `folder:${folderId}` : `unfiled:${repoKey}`;
+  const { isOver, setNodeRef } = useDroppable({
+    id: droppableId,
+    data: { repoKey, folderId },
+  });
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={`mx-2 mb-1 border border-transparent ${
+        isOver ? "border-accent bg-accent-muted/40" : ""
+      }`}
+    >
+      <div className="flex items-center gap-1 px-3 py-1.5 text-xs text-muted-foreground">
+        <FolderIcon className="h-3.5 w-3.5" />
+        <span className="truncate">{title}</span>
+        {onRename && (
+          <>
+            <button
+              type="button"
+              className="ml-auto text-[11px] hover:text-foreground"
+              onClick={onRename}
+              title="Rename folder"
+            >
+              Rename
+            </button>
+            <button
+              type="button"
+              className="text-[11px] hover:text-foreground"
+              onClick={onDelete}
+              title="Delete folder"
+            >
+              Delete
+            </button>
+          </>
+        )}
+      </div>
+      {sessions.length === 0 ? (
+        <div className="px-3 pb-2 text-xs text-muted-foreground/70">Drop sessions here</div>
+      ) : (
+        sessions.map((session) => (
+          <SessionListItem
+            key={session.id}
+            session={session}
+            isActive={session.id === currentSessionId}
+            isMobile={isMobile}
+            onSessionSelect={onSessionSelect}
+            onArchive={onArchive}
+            isArchiving={archivingIds.has(session.id)}
+            repoKey={repoKey}
+            folderId={folderId}
+          />
+        ))
+      )}
+    </div>
   );
 }
 
@@ -249,6 +561,8 @@ function SessionListItem({
   onSessionSelect,
   onArchive,
   isArchiving,
+  repoKey,
+  folderId,
 }: {
   session: SessionItem;
   isActive: boolean;
@@ -256,14 +570,30 @@ function SessionListItem({
   onSessionSelect?: () => void;
   onArchive?: (sessionId: string) => Promise<void> | void;
   isArchiving?: boolean;
+  repoKey: string;
+  folderId: string | null;
 }) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: `session:${session.id}`,
+    data: { sessionId: session.id, repoKey, folderId },
+  });
   const timestamp = session.updatedAt || session.createdAt;
   const relativeTime = formatRelativeTime(timestamp);
   const displayTitle = session.title || `${session.repoOwner}/${session.repoName}`;
   const repoInfo = `${session.repoOwner}/${session.repoName}`;
+
+  const style = {
+    transform: CSS.Translate.toString(transform),
+    opacity: isDragging ? 0.6 : 1,
+  };
+
   return (
     <div
-      className={`group flex items-center gap-2 border-l-2 px-4 py-2.5 transition ${
+      ref={setNodeRef}
+      style={style}
+      {...listeners}
+      {...attributes}
+      className={`group flex cursor-grab items-center gap-2 border-l-2 px-4 py-2.5 transition active:cursor-grabbing ${
         isActive ? "border-l-accent bg-accent-muted" : "border-l-transparent hover:bg-muted"
       }`}
     >
