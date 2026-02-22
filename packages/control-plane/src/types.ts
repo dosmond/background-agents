@@ -144,6 +144,7 @@ export type ServerMessage =
   | { type: "sandbox_restored"; message: string }
   | { type: "sandbox_warning"; message: string }
   | { type: "session_status"; status: SessionStatus }
+  | { type: "session_title"; title: string | null }
   | { type: "processing_status"; isProcessing: boolean }
   | {
       type: "history_page";

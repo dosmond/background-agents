@@ -107,6 +107,7 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
   const spawnSandbox = vi.fn(async () => {});
   const updateLastActivity = vi.fn();
   const waitUntil = vi.fn();
+  const ensureInitialTitle = vi.fn(async (_prompt: string) => {});
 
   const queue = new SessionMessageQueue({
     env: {} as Env,
@@ -129,6 +130,7 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
     updateLastActivity,
     spawnSandbox,
     broadcast,
+    ensureInitialTitle,
   });
 
   return {
@@ -138,6 +140,7 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
     broadcast,
     spawnSandbox,
     waitUntil,
+    ensureInitialTitle,
   };
 }
 
@@ -163,6 +166,14 @@ describe("SessionMessageQueue", () => {
     expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_spawning" });
     expect(h.spawnSandbox).toHaveBeenCalledTimes(1);
     expect(h.repository.updateMessageToProcessing).not.toHaveBeenCalled();
+  });
+
+  it("attempts to generate first title when prompt is queued", async () => {
+    const h = buildQueue();
+
+    await h.queue.handlePromptMessage({} as WebSocket, { content: "Initial prompt" });
+
+    expect(h.ensureInitialTitle).toHaveBeenCalledWith("Initial prompt");
   });
 
   it("dispatches prompt command when sandbox socket exists", async () => {

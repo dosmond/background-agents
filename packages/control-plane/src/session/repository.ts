@@ -260,6 +260,15 @@ export class SessionRepository {
     );
   }
 
+  updateSessionTitle(sessionId: string, title: string | null, updatedAt: number): void {
+    this.sql.exec(
+      `UPDATE session SET title = ?, updated_at = ? WHERE id = ?`,
+      title,
+      updatedAt,
+      sessionId
+    );
+  }
+
   // === SANDBOX ===
   // Note: Each session DO has exactly one sandbox row, so update methods use
   // a subquery `WHERE id = (SELECT id FROM sandbox LIMIT 1)` to find it.

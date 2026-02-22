@@ -146,6 +146,16 @@ describe("SessionRepository", () => {
     });
   });
 
+  describe("updateSessionTitle", () => {
+    it("updates title and timestamp", () => {
+      repo.updateSessionTitle("sess-1", "Renamed", 3000);
+
+      expect(mock.calls.length).toBe(1);
+      expect(mock.calls[0].query).toContain("UPDATE session SET title");
+      expect(mock.calls[0].params).toEqual(["Renamed", 3000, "sess-1"]);
+    });
+  });
+
   // === SANDBOX ===
 
   describe("getSandbox", () => {

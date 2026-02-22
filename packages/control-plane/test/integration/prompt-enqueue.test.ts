@@ -153,4 +153,20 @@ describe("POST /internal/prompt", () => {
     expect(parsed.channel).toBe("C1234");
     expect(parsed.threadTs).toBe("1234567890.123456");
   });
+
+  it("keeps title unset when auto-title generation is unavailable", async () => {
+    const { stub } = await initSession({ title: null });
+
+    const res = await stub.fetch("http://internal/internal/prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "First prompt", authorId: "user-1", source: "web" }),
+    });
+    expect(res.status).toBe(200);
+
+    const stateRes = await stub.fetch("http://internal/internal/state");
+    expect(stateRes.status).toBe(200);
+    const state = await stateRes.json<{ title: string | null }>();
+    expect(state.title).toBeNull();
+  });
 });

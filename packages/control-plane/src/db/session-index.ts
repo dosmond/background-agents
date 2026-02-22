@@ -151,6 +151,15 @@ export class SessionIndexStore {
     return (result.meta?.changes ?? 0) > 0;
   }
 
+  async updateTitle(id: string, title: string | null): Promise<boolean> {
+    const result = await this.db
+      .prepare("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?")
+      .bind(title, Date.now(), id)
+      .run();
+
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
   async delete(id: string): Promise<boolean> {
     const result = await this.db.prepare("DELETE FROM sessions WHERE id = ?").bind(id).run();
 

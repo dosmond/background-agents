@@ -20,6 +20,7 @@ const QUERY_PATTERNS = {
   SELECT_COUNT: /^SELECT COUNT\(\*\) as count FROM sessions\b/,
   SELECT_LIST: /^SELECT \* FROM sessions\b.*ORDER BY updated_at DESC LIMIT/,
   UPDATE_STATUS: /^UPDATE sessions SET status = \?/,
+  UPDATE_TITLE: /^UPDATE sessions SET title = \?/,
   DELETE_SESSION: /^DELETE FROM sessions WHERE id = \?$/,
 } as const;
 
@@ -112,6 +113,17 @@ class FakeD1Database {
       const row = this.rows.get(id);
       if (row) {
         row.status = status;
+        row.updated_at = updatedAt;
+        return { meta: { changes: 1 } };
+      }
+      return { meta: { changes: 0 } };
+    }
+
+    if (QUERY_PATTERNS.UPDATE_TITLE.test(normalized)) {
+      const [title, updatedAt, id] = args as [string | null, number, string];
+      const row = this.rows.get(id);
+      if (row) {
+        row.title = title;
         row.updated_at = updatedAt;
         return { meta: { changes: 1 } };
       }
@@ -318,6 +330,22 @@ describe("SessionIndexStore", () => {
 
     it("returns false when session not found", async () => {
       const updated = await store.updateStatus("nonexistent", "archived");
+      expect(updated).toBe(false);
+    });
+  });
+
+  describe("updateTitle", () => {
+    it("updates title of an existing session", async () => {
+      await store.create(makeSession());
+      const updated = await store.updateTitle("test-id", "Renamed Session");
+      expect(updated).toBe(true);
+
+      const session = await store.get("test-id");
+      expect(session?.title).toBe("Renamed Session");
+    });
+
+    it("returns false when session not found", async () => {
+      const updated = await store.updateTitle("nonexistent", "Renamed Session");
       expect(updated).toBe(false);
     });
   });

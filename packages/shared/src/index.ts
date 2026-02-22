@@ -7,3 +7,4 @@ export * from "./git";
 export * from "./auth";
 export * from "./models";
 export * from "./theme";
+export * from "./session-title";

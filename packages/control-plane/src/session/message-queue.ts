@@ -40,6 +40,7 @@ interface MessageQueueDeps {
   updateLastActivity: (timestamp: number) => void;
   spawnSandbox: () => Promise<void>;
   broadcast: (message: ServerMessage) => void;
+  ensureInitialTitle?: (promptContent: string) => Promise<void>;
   scheduleExecutionTimeout?: (startedAtMs: number) => Promise<void>;
 }
 
@@ -132,6 +133,10 @@ export class SessionMessageQueue {
       status: "pending",
       createdAt: now,
     });
+
+    if (this.deps.ensureInitialTitle) {
+      await this.deps.ensureInitialTitle(data.content);
+    }
 
     this.writeUserMessageEvent(participant, data.content, messageId, now);
 
@@ -395,6 +400,10 @@ export class SessionMessageQueue {
       status: "pending",
       createdAt: now,
     });
+
+    if (this.deps.ensureInitialTitle) {
+      await this.deps.ensureInitialTitle(data.content);
+    }
 
     this.writeUserMessageEvent(participant, data.content, messageId, now);
 

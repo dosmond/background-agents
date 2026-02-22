@@ -1,6 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { SELF, env } from "cloudflare:test";
 import { generateInternalToken } from "../../src/auth/internal";
+import { cleanD1Tables } from "./cleanup";
 
 async function authHeaders(): Promise<Record<string, string>> {
   const token = await generateInternalToken(env.INTERNAL_CALLBACK_SECRET!);
@@ -8,6 +9,8 @@ async function authHeaders(): Promise<Record<string, string>> {
 }
 
 describe("Worker fetch handler", () => {
+  beforeEach(cleanD1Tables);
+
   it("returns 404 for unknown authenticated paths", async () => {
     const response = await SELF.fetch("https://test.local/unknown-path", {
       headers: await authHeaders(),

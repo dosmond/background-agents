@@ -222,6 +222,7 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
         cursor: { timestamp: number; id: string } | null;
       };
       spawnError?: string | null;
+      title?: string | null;
     }) => {
       switch (data.type) {
         case "subscribed": {
@@ -348,6 +349,12 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
         case "session_status":
           if (data.status) {
             setSessionState((prev) => (prev ? { ...prev, status: data.status! } : null));
+          }
+          break;
+
+        case "session_title":
+          if (typeof data.title === "string" || data.title === null) {
+            setSessionState((prev) => (prev ? { ...prev, title: data.title ?? null } : null));
           }
           break;
 

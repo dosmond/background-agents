@@ -16,6 +16,8 @@ import { UserScmTokenStore, DEFAULT_TOKEN_LIFETIME_MS } from "./db/user-scm-toke
 import {
   getValidModelOrDefault,
   isValidReasoningEffort,
+  MAX_SESSION_TITLE_LENGTH,
+  trimSessionTitle,
   type CallbackContext,
 } from "@open-inspect/shared";
 import { createRequestMetrics, instrumentD1 } from "./db/instrumented-d1";
@@ -310,6 +312,11 @@ const routes: Route[] = [
     method: "GET",
     pattern: parsePattern("/sessions/:id"),
     handler: handleGetSession,
+  },
+  {
+    method: "PATCH",
+    pattern: parsePattern("/sessions/:id"),
+    handler: handleUpdateSessionTitle,
   },
   {
     method: "DELETE",
@@ -694,6 +701,56 @@ async function handleGetSession(
   if (!response.ok) {
     return error("Session not found", 404);
   }
+
+  return response;
+}
+
+async function handleUpdateSessionTitle(
+  request: Request,
+  env: Env,
+  match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  const sessionId = match.groups?.id;
+  if (!sessionId) return error("Session ID required");
+
+  let body: { userId?: string; title?: string };
+  try {
+    body = (await request.json()) as { userId?: string; title?: string };
+  } catch {
+    return error("Invalid request body");
+  }
+
+  if (!body.userId) {
+    return error("userId is required");
+  }
+
+  if (typeof body.title !== "string") {
+    return error("title must be a string");
+  }
+
+  const normalizedTitle = trimSessionTitle(body.title);
+  if (normalizedTitle.length === 0) {
+    return error("title must not be empty");
+  }
+
+  if (normalizedTitle.length > MAX_SESSION_TITLE_LENGTH) {
+    return error(`title must be <= ${MAX_SESSION_TITLE_LENGTH} characters`);
+  }
+
+  const doId = env.SESSION.idFromName(sessionId);
+  const stub = env.SESSION.get(doId);
+  const response = await stub.fetch(
+    internalRequest(
+      "http://internal/internal/update-title",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: body.userId, title: normalizedTitle }),
+      },
+      ctx
+    )
+  );
 
   return response;
 }

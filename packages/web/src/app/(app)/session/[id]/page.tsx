@@ -25,7 +25,13 @@ import { ActionBar } from "@/components/action-bar";
 import { copyToClipboard, formatModelNameLower } from "@/lib/format";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
 import { useMediaQuery } from "@/hooks/use-media-query";
-import { DEFAULT_MODEL, getDefaultReasoningEffort, type ModelCategory } from "@open-inspect/shared";
+import {
+  DEFAULT_MODEL,
+  getDefaultReasoningEffort,
+  MAX_SESSION_TITLE_LENGTH,
+  trimSessionTitle,
+  type ModelCategory,
+} from "@open-inspect/shared";
 import { useEnabledModels } from "@/hooks/use-enabled-models";
 import { ReasoningEffortPills } from "@/components/reasoning-effort-pills";
 import { SessionGitDiffPanel } from "@/components/session-git-diff-panel";
@@ -364,6 +370,29 @@ function SessionContent({
   const isPrependingRef = useRef(false);
   const prevScrollHeightRef = useRef(0);
   const isNearBottomRef = useRef(true);
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [titleError, setTitleError] = useState<string | null>(null);
+  const [optimisticTitle, setOptimisticTitle] = useState<string | null>(null);
+
+  const { trigger: updateTitle, isMutating: isUpdatingTitle } = useSWRMutation(
+    `/api/sessions/${sessionId}/title`,
+    async (url: string, { arg }: { arg: string }) => {
+      const response = await fetch(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: arg }),
+      });
+
+      const payload = (await response.json()) as { title?: string; error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error || "Failed to update session title");
+      }
+
+      return payload.title ?? arg;
+    },
+    { throwOnError: false }
+  );
 
   const closeDetails = useCallback(() => {
     setIsDetailsOpen(false);
@@ -543,8 +572,60 @@ function SessionContent({
     resolvedRepoOwner && resolvedRepoName
       ? `${resolvedRepoOwner}/${resolvedRepoName}`
       : "Loading session...";
-  const resolvedTitle = sessionState?.title || fallbackSessionInfo.title || fallbackRepoLabel;
+  const persistedTitle = sessionState?.title || fallbackSessionInfo.title;
+  const resolvedTitle = optimisticTitle || persistedTitle || fallbackRepoLabel;
   const showTimelineSkeleton = events.length === 0 && (connecting || replaying);
+
+  useEffect(() => {
+    if (!isEditingTitle) {
+      setTitleDraft(persistedTitle ?? "");
+    }
+  }, [isEditingTitle, persistedTitle]);
+
+  useEffect(() => {
+    if (sessionState?.title && optimisticTitle === sessionState.title) {
+      setOptimisticTitle(null);
+    }
+  }, [optimisticTitle, sessionState?.title]);
+
+  const submitTitleUpdate = useCallback(async () => {
+    const normalized = trimSessionTitle(titleDraft);
+    if (!normalized) {
+      setTitleError("Title cannot be empty.");
+      return;
+    }
+
+    if (normalized.length > MAX_SESSION_TITLE_LENGTH) {
+      setTitleError(`Title must be ${MAX_SESSION_TITLE_LENGTH} characters or less.`);
+      return;
+    }
+
+    setTitleError(null);
+    setOptimisticTitle(normalized);
+    setIsEditingTitle(false);
+
+    const updatedTitle = await updateTitle(normalized);
+    if (!updatedTitle) {
+      setOptimisticTitle(null);
+      setTitleError("Failed to update title.");
+      return;
+    }
+
+    mutate(
+      "/api/sessions",
+      (current: { sessions?: Array<{ id: string; title: string | null }> } | undefined) => {
+        if (!current?.sessions) return current;
+        return {
+          ...current,
+          sessions: current.sessions.map((session) =>
+            session.id === sessionId ? { ...session, title: normalized } : session
+          ),
+        };
+      },
+      false
+    );
+    mutate("/api/sessions");
+  }, [sessionId, titleDraft, updateTitle]);
 
   const fetchGitChanges = useCallback(async () => {
     setGitLoading(true);
@@ -623,8 +704,58 @@ function SessionContent({
               </button>
             )}
             <div>
-              <h1 className="font-medium text-foreground">{resolvedTitle}</h1>
+              {isEditingTitle ? (
+                <form
+                  className="flex items-center gap-2"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void submitTitleUpdate();
+                  }}
+                >
+                  <input
+                    value={titleDraft}
+                    onChange={(event) => setTitleDraft(event.target.value)}
+                    className="w-80 max-w-full border border-border-muted bg-background px-2 py-1 text-sm text-foreground"
+                    maxLength={MAX_SESSION_TITLE_LENGTH}
+                    autoFocus
+                    aria-label="Session title"
+                  />
+                  <button
+                    type="submit"
+                    disabled={isUpdatingTitle}
+                    className="px-2 py-1 text-xs border border-border-muted text-foreground hover:bg-muted disabled:opacity-50"
+                  >
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsEditingTitle(false);
+                      setTitleError(null);
+                      setTitleDraft(persistedTitle ?? "");
+                    }}
+                    className="px-2 py-1 text-xs border border-border-muted text-muted-foreground hover:text-foreground hover:bg-muted"
+                  >
+                    Cancel
+                  </button>
+                </form>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <h1 className="font-medium text-foreground">{resolvedTitle}</h1>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTitleError(null);
+                      setIsEditingTitle(true);
+                    }}
+                    className="text-xs text-muted-foreground hover:text-foreground"
+                  >
+                    Rename
+                  </button>
+                </div>
+              )}
               <p className="text-sm text-muted-foreground">{fallbackRepoLabel}</p>
+              {titleError && <p className="text-xs text-red-500 mt-1">{titleError}</p>}
             </div>
           </div>
           <div className="flex items-center gap-4">

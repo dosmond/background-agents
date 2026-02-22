@@ -95,6 +95,38 @@ describe("POST /internal/unarchive", () => {
   });
 });
 
+describe("POST /internal/update-title", () => {
+  it("updates title for session participant", async () => {
+    const { stub } = await initSession({ userId: "user-1", title: "Original title" });
+
+    const res = await stub.fetch("http://internal/internal/update-title", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "user-1", title: "Renamed session" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json<{ title: string }>();
+    expect(body.title).toBe("Renamed session");
+
+    const stateRes = await stub.fetch("http://internal/internal/state");
+    const state = await stateRes.json<{ title: string }>();
+    expect(state.title).toBe("Renamed session");
+  });
+
+  it("rejects non-participant title updates", async () => {
+    const { stub } = await initSession({ userId: "user-1", title: "Original title" });
+
+    const res = await stub.fetch("http://internal/internal/update-title", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "stranger", title: "Renamed session" }),
+    });
+
+    expect(res.status).toBe(403);
+  });
+});
+
 describe("POST /internal/verify-sandbox-token", () => {
   it("validates token using hashed sandbox auth token", async () => {
     const { stub } = await initSession();

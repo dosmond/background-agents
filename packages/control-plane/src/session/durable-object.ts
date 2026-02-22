@@ -62,10 +62,13 @@ import { RepoMcpConfigStore, resolveMcpSecretRefs } from "../db/repo-mcp-config"
 import { OpenAITokenRefreshService } from "./openai-token-refresh-service";
 import { ParticipantService, getAvatarUrl } from "./participant-service";
 import { UserScmTokenStore } from "../db/user-scm-tokens";
+import { SessionTitleGenerationService } from "./session-title-generation-service";
 import { CallbackNotificationService } from "./callback-notification-service";
 import { PresenceService } from "./presence-service";
 import { SessionMessageQueue } from "./message-queue";
 import { SessionSandboxEventProcessor } from "./sandbox-events";
+import { SessionIndexStore } from "../db/session-index";
+import { MAX_SESSION_TITLE_LENGTH, trimSessionTitle } from "@open-inspect/shared";
 
 /**
  * Valid event types for filtering.
@@ -170,6 +173,11 @@ export class SessionDO extends DurableObject<Env> {
     },
     { method: "POST", path: "/internal/archive", handler: (req) => this.handleArchive(req) },
     { method: "POST", path: "/internal/unarchive", handler: (req) => this.handleUnarchive(req) },
+    {
+      method: "POST",
+      path: "/internal/update-title",
+      handler: (req) => this.handleUpdateTitle(req),
+    },
     {
       method: "POST",
       path: "/internal/verify-sandbox-token",
@@ -303,6 +311,8 @@ export class SessionDO extends DurableObject<Env> {
         updateLastActivity: (timestamp) => this.updateLastActivity(timestamp),
         spawnSandbox: () => this.spawnSandbox(),
         broadcast: (message) => this.broadcast(message),
+        ensureInitialTitle: async (promptContent: string) =>
+          this.ensureSessionTitleFromFirstPrompt(promptContent),
         scheduleExecutionTimeout: async (startedAtMs: number) => {
           const deadline = startedAtMs + this.executionTimeoutMs;
           const currentAlarm = await this.ctx.storage.getAlarm();
@@ -1608,6 +1618,92 @@ export class SessionDO extends DurableObject<Env> {
       });
       throw error;
     }
+  }
+
+  private async persistSessionTitle(title: string | null): Promise<void> {
+    const session = this.getSession();
+    if (!session) return;
+
+    const now = Date.now();
+    this.repository.updateSessionTitle(session.id, title, now);
+
+    if (this.env.DB) {
+      const sessionStore = new SessionIndexStore(this.env.DB);
+      try {
+        await sessionStore.updateTitle(session.id, title);
+      } catch (error) {
+        this.log.warn("Failed to update title in D1 session index", {
+          session_id: session.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    this.broadcast({ type: "session_title", title });
+  }
+
+  private async ensureSessionTitleFromFirstPrompt(promptContent: string): Promise<void> {
+    const session = this.getSession();
+    if (!session || session.title) return;
+
+    // "First prompt" means only one message exists after enqueue.
+    if (this.repository.getMessageCount() !== 1) return;
+
+    const generator = new SessionTitleGenerationService({
+      env: this.env,
+      db: this.env.DB,
+      log: this.log,
+      ensureRepoId: async (sessionRow: SessionRow) => this.ensureRepoId(sessionRow),
+    });
+    const generatedTitle = await generator.generateFromFirstPrompt(session, promptContent);
+    if (!generatedTitle) return;
+
+    await this.persistSessionTitle(generatedTitle);
+  }
+
+  private async handleUpdateTitle(request: Request): Promise<Response> {
+    const session = this.getSession();
+    if (!session) {
+      return Response.json({ error: "Session not found" }, { status: 404 });
+    }
+
+    let body: { userId?: string; title?: string };
+    try {
+      body = (await request.json()) as { userId?: string; title?: string };
+    } catch {
+      return Response.json({ error: "Invalid request body" }, { status: 400 });
+    }
+
+    if (!body.userId) {
+      return Response.json({ error: "userId is required" }, { status: 400 });
+    }
+
+    if (typeof body.title !== "string") {
+      return Response.json({ error: "title must be a string" }, { status: 400 });
+    }
+
+    const normalizedTitle = trimSessionTitle(body.title);
+    if (normalizedTitle.length === 0) {
+      return Response.json({ error: "title must not be empty" }, { status: 400 });
+    }
+
+    if (normalizedTitle.length > MAX_SESSION_TITLE_LENGTH) {
+      return Response.json(
+        { error: `title must be <= ${MAX_SESSION_TITLE_LENGTH} characters` },
+        { status: 400 }
+      );
+    }
+
+    const participant = this.participantService.getByUserId(body.userId);
+    if (!participant) {
+      return Response.json(
+        { error: "Not authorized to update this session title" },
+        { status: 403 }
+      );
+    }
+
+    await this.persistSessionTitle(normalizedTitle);
+    return Response.json({ title: normalizedTitle });
   }
 
   private async handleStop(): Promise<Response> {
