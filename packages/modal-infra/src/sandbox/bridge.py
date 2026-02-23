@@ -662,6 +662,7 @@ class AgentBridge:
             content,
             "--output-format",
             "stream-json",
+            "--force",
         ]
         normalized_model = self._normalize_cursor_model(model)
         if normalized_model:
