@@ -19,4 +19,6 @@ export {
   getReasoningConfig,
   getDefaultReasoningEffort,
   isValidReasoningEffort,
+  CURSOR_SUPPORTED_MODELS,
+  isCursorSupportedModel,
 } from "@open-inspect/shared";

@@ -32,6 +32,17 @@ export type ValidModel = (typeof VALID_MODELS)[number];
 export const DEFAULT_MODEL: ValidModel = "anthropic/claude-sonnet-4-6";
 
 /**
+ * Static list of models that should default to Cursor-first routing.
+ * Kept intentionally explicit for v1 to avoid runtime drift.
+ */
+export const CURSOR_SUPPORTED_MODELS = [
+  "openai/gpt-5.2",
+  "openai/gpt-5.2-codex",
+  "openai/gpt-5.3-codex",
+  "openai/gpt-5.3-codex-spark",
+] as const satisfies readonly ValidModel[];
+
+/**
  * Reasoning effort levels supported across providers.
  *
  * - "none": No reasoning (OpenAI only)
@@ -229,4 +240,12 @@ export function getValidModelOrDefault(model: string | undefined | null): ValidM
     return normalizeModelId(model) as ValidModel;
   }
   return DEFAULT_MODEL;
+}
+
+/**
+ * Check whether a model is configured for Cursor-first routing.
+ */
+export function isCursorSupportedModel(model: string): boolean {
+  const normalized = normalizeModelId(model);
+  return CURSOR_SUPPORTED_MODELS.includes(normalized as (typeof CURSOR_SUPPORTED_MODELS)[number]);
 }

@@ -18,6 +18,8 @@ interface MetadataSectionProps {
   createdAt: number;
   model?: string;
   reasoningEffort?: string;
+  providerMode?: "cursor" | "provider";
+  providerFallbackReason?: "unsupported_model" | "cursor_429" | "cursor_quota_exhausted" | null;
   branchName?: string;
   repoOwner?: string;
   repoName?: string;
@@ -28,6 +30,8 @@ export function MetadataSection({
   createdAt,
   model,
   reasoningEffort,
+  providerMode,
+  providerFallbackReason,
   branchName,
   repoOwner,
   repoName,
@@ -73,6 +77,13 @@ export function MetadataSection({
             {formatModelName(model)}
             {reasoningEffort && <span> · {reasoningEffort}</span>}
           </span>
+        </div>
+      )}
+
+      {providerMode === "provider" && (
+        <div className="flex items-center gap-2 text-sm text-warning">
+          <span className="w-2 h-2 rounded-full bg-warning" />
+          <span title={providerFallbackReason ?? undefined}>Using provider fallback</span>
         </div>
       )}
 

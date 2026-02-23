@@ -131,6 +131,7 @@ class AgentBridge:
     HTTP_DEFAULT_TIMEOUT = 30.0
     OPENCODE_REQUEST_TIMEOUT = 10.0
     PROMPT_MAX_DURATION = 5400.0
+    CURSOR_REQUEST_TIMEOUT = 5400.0
     MAX_PENDING_PART_EVENTS = 2000
     MAX_EVENT_BUFFER_SIZE = 1000
     CRITICAL_EVENT_TYPES: ClassVar[set[str]] = {
@@ -178,6 +179,8 @@ class AgentBridge:
         # Session state
         self.opencode_session_id: str | None = None
         self.session_id_file = Path(tempfile.gettempdir()) / "opencode-session-id"
+        self.cursor_session_id: str | None = None
+        self.cursor_session_id_file = Path(tempfile.gettempdir()) / "cursor-session-id"
         self.repo_path = Path("/workspace")
 
         # HTTP client for OpenCode API
@@ -213,6 +216,7 @@ class AgentBridge:
             )
         )
         await self._load_session_id()
+        self._load_cursor_session_id()
 
         reconnect_attempts = 0
 
@@ -507,6 +511,11 @@ class AgentBridge:
         content = cmd.get("content", "")
         model = cmd.get("model")
         reasoning_effort = cmd.get("reasoningEffort")
+        provider_mode = cmd.get("providerMode") or cmd.get("provider_mode") or "provider"
+        cursor_session_id = cmd.get("cursorSessionId") or cmd.get("cursor_session_id")
+        if isinstance(cursor_session_id, str) and cursor_session_id.strip():
+            self.cursor_session_id = cursor_session_id.strip()
+            self._save_cursor_session_id()
         author_data = cmd.get("author", {})
         start_time = time.time()
         outcome = "success"
@@ -528,15 +537,26 @@ class AgentBridge:
                 )
             )
 
-        if not self.opencode_session_id:
-            await self._create_opencode_session()
-
         try:
             had_error = False
             error_message = None
-            async for event in self._stream_opencode_response_sse(
-                message_id, content, model, reasoning_effort
-            ):
+            cursor_cli_enabled = os.environ.get("CURSOR_CLI_ENABLED", "true") != "false"
+            use_cursor_cli = provider_mode == "cursor" and cursor_cli_enabled
+            if provider_mode == "cursor" and not cursor_cli_enabled:
+                self.log.warn("cursor.prompt.disabled", message_id=message_id)
+
+            if not use_cursor_cli and not self.opencode_session_id:
+                await self._create_opencode_session()
+
+            event_stream = (
+                self._stream_cursor_cli_response(message_id, content, model)
+                if use_cursor_cli
+                else self._stream_opencode_response_sse(
+                    message_id, content, model, reasoning_effort
+                )
+            )
+
+            async for event in event_stream:
                 if event.get("type") == "error":
                     had_error = True
                     error_message = event.get("error")
@@ -551,6 +571,11 @@ class AgentBridge:
                     "messageId": message_id,
                     "success": not had_error,
                     **({"error": error_message} if error_message else {}),
+                    **(
+                        {"cursorSessionId": self.cursor_session_id}
+                        if self.cursor_session_id
+                        else {}
+                    ),
                 }
             )
 
@@ -572,9 +597,198 @@ class AgentBridge:
                 message_id=message_id,
                 model=model,
                 reasoning_effort=reasoning_effort,
+                provider_mode=provider_mode,
                 outcome=outcome,
                 duration_ms=duration_ms,
             )
+
+    def _resolve_repo_workdir(self) -> Path:
+        """Resolve repository working directory if available."""
+        repo_dirs = list(self.repo_path.glob("*/.git"))
+        if repo_dirs:
+            return repo_dirs[0].parent
+        return self.repo_path
+
+    @staticmethod
+    def _normalize_cursor_model(model: str | None) -> str | None:
+        """Normalize Open-Inspect model format to Cursor CLI model format."""
+        if not model:
+            return None
+        if "/" in model:
+            _, model_id = model.split("/", 1)
+            return model_id
+        return model
+
+    @staticmethod
+    def _extract_cursor_assistant_text(event: dict[str, Any]) -> str:
+        """Extract plain text from Cursor stream-json assistant payloads."""
+        message = event.get("message")
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        if not isinstance(content, list):
+            return ""
+        text_parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    text_parts.append(text)
+        return "".join(text_parts)
+
+    @staticmethod
+    def _extract_cursor_tool_info(tool_call: dict[str, Any]) -> tuple[str, dict[str, Any], Any]:
+        """Extract tool name, args, and result from Cursor tool call payload."""
+        for tool_name, payload in tool_call.items():
+            if isinstance(payload, dict):
+                args = payload.get("args")
+                result = payload.get("result")
+                if isinstance(args, dict):
+                    return str(tool_name), args, result
+                return str(tool_name), {}, result
+        return "unknown_tool", {}, None
+
+    async def _stream_cursor_cli_response(
+        self,
+        message_id: str,
+        content: str,
+        model: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Execute prompt via Cursor CLI and stream mapped bridge events."""
+        cmd = [
+            "agent",
+            "-p",
+            content,
+            "--output-format",
+            "stream-json",
+        ]
+        normalized_model = self._normalize_cursor_model(model)
+        if normalized_model:
+            cmd.extend(["--model", normalized_model])
+        if self.cursor_session_id:
+            cmd.extend(["--resume", self.cursor_session_id])
+
+        env = os.environ.copy()
+        workdir = self._resolve_repo_workdir()
+        self.log.info(
+            "cursor.prompt.start",
+            message_id=message_id,
+            model=normalized_model,
+            has_resume=bool(self.cursor_session_id),
+            cwd=str(workdir),
+        )
+
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(workdir),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        stderr_chunks: list[str] = []
+        latest_text = ""
+        had_error = False
+
+        async def consume_stderr() -> None:
+            if not process.stderr:
+                return
+            while True:
+                chunk = await process.stderr.readline()
+                if not chunk:
+                    break
+                stderr_chunks.append(chunk.decode("utf-8", errors="replace").rstrip())
+
+        stderr_task = asyncio.create_task(consume_stderr())
+
+        try:
+            if process.stdout:
+                while True:
+                    line = await process.stdout.readline()
+                    if not line:
+                        break
+
+                    raw = line.decode("utf-8", errors="replace").strip()
+                    if not raw:
+                        continue
+
+                    try:
+                        event = json.loads(raw)
+                    except json.JSONDecodeError:
+                        self.log.debug("cursor.stream.parse_error", line=raw[:200])
+                        continue
+
+                    event_type = event.get("type")
+                    if event_type in ("system", "result"):
+                        session_id = event.get("session_id")
+                        if isinstance(session_id, str) and session_id.strip():
+                            self.cursor_session_id = session_id.strip()
+                            self._save_cursor_session_id()
+
+                    if event_type == "assistant":
+                        text = self._extract_cursor_assistant_text(event)
+                        if text and text != latest_text:
+                            latest_text = text
+                            yield {
+                                "type": "token",
+                                "content": latest_text,
+                                "messageId": message_id,
+                            }
+                        continue
+
+                    if event_type == "tool_call":
+                        subtype = event.get("subtype")
+                        call_id = event.get("call_id") or "cursor-tool-call"
+                        tool_payload = event.get("tool_call")
+                        if isinstance(tool_payload, dict):
+                            tool_name, tool_args, tool_result = self._extract_cursor_tool_info(
+                                tool_payload
+                            )
+                        else:
+                            tool_name, tool_args, tool_result = "unknown_tool", {}, None
+
+                        if subtype == "started":
+                            yield {
+                                "type": "tool_call",
+                                "tool": tool_name,
+                                "args": tool_args,
+                                "callId": str(call_id),
+                                "status": "running",
+                                "messageId": message_id,
+                            }
+                        elif subtype == "completed":
+                            yield {
+                                "type": "tool_result",
+                                "callId": str(call_id),
+                                "result": json.dumps(tool_result)
+                                if tool_result is not None
+                                else "",
+                                "messageId": message_id,
+                            }
+                        continue
+
+                    if event_type == "result":
+                        is_error = bool(event.get("is_error"))
+                        if is_error:
+                            had_error = True
+                            yield {
+                                "type": "error",
+                                "error": str(event.get("result") or "Cursor CLI request failed"),
+                                "messageId": message_id,
+                            }
+                        continue
+        finally:
+            with contextlib.suppress(asyncio.CancelledError):
+                await stderr_task
+            return_code = await process.wait()
+
+            if return_code != 0 and not had_error:
+                stderr_text = "\n".join(stderr_chunks).strip()
+                yield {
+                    "type": "error",
+                    "error": stderr_text or f"Cursor CLI exited with status {return_code}",
+                    "messageId": message_id,
+                }
 
     async def _create_opencode_session(self) -> None:
         """Create a new OpenCode session."""
@@ -1448,6 +1662,24 @@ class AgentBridge:
                 self.session_id_file.write_text(self.opencode_session_id)
             except Exception as e:
                 self.log.error("opencode.session.save_error", exc=e)
+
+    def _load_cursor_session_id(self) -> None:
+        """Load Cursor CLI session ID from file if it exists."""
+        if self.cursor_session_id_file.exists():
+            try:
+                loaded = self.cursor_session_id_file.read_text().strip()
+                if loaded:
+                    self.cursor_session_id = loaded
+            except Exception as e:
+                self.log.error("cursor.session.load_error", exc=e)
+
+    def _save_cursor_session_id(self) -> None:
+        """Persist Cursor CLI session ID for sandbox restarts."""
+        if self.cursor_session_id:
+            try:
+                self.cursor_session_id_file.write_text(self.cursor_session_id)
+            except Exception as e:
+                self.log.error("cursor.session.save_error", exc=e)
 
     async def _request_opencode_stop(self, reason: str) -> bool:
         if not self.http_client or not self.opencode_session_id:

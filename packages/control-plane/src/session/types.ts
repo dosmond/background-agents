@@ -27,8 +27,12 @@ export interface SessionRow {
   base_sha: string | null;
   current_sha: string | null;
   opencode_session_id: string | null;
+  cursor_session_id: string | null;
   model: string; // LLM model to use (e.g., "anthropic/claude-haiku-4-5")
   reasoning_effort: string | null; // Reasoning effort level (e.g., "high", "max")
+  provider_mode: "cursor" | "provider";
+  provider_fallback_until_ms: number | null;
+  provider_fallback_reason: "unsupported_model" | "cursor_429" | "cursor_quota_exhausted" | null;
   status: SessionStatus;
   created_at: number;
   updated_at: number;
@@ -107,6 +111,8 @@ export interface PromptCommand {
   content: string;
   model?: string; // LLM model for per-message override
   reasoningEffort?: string; // Reasoning effort level
+  providerMode?: "cursor" | "provider";
+  cursorSessionId?: string | null;
   author: {
     userId: string;
     scmName: string | null;
@@ -142,6 +148,10 @@ export interface SessionUpdate {
   baseSha?: string;
   currentSha?: string;
   opencodeSessionId?: string;
+  cursorSessionId?: string | null;
+  providerMode?: "cursor" | "provider";
+  providerFallbackUntilMs?: number | null;
+  providerFallbackReason?: "unsupported_model" | "cursor_429" | "cursor_quota_exhausted" | null;
   status?: SessionStatus;
 }
 

@@ -19,8 +19,12 @@ CREATE TABLE IF NOT EXISTS session (
   base_sha TEXT,                                    -- SHA of base branch at session start
   current_sha TEXT,                                 -- Current HEAD SHA
   opencode_session_id TEXT,                         -- OpenCode session ID (for 1:1 mapping)
+  cursor_session_id TEXT,                           -- Cursor CLI session ID for --resume
   model TEXT DEFAULT 'anthropic/claude-haiku-4-5',   -- LLM model to use
   reasoning_effort TEXT,                            -- Session-level reasoning effort default
+  provider_mode TEXT NOT NULL DEFAULT 'cursor',     -- 'cursor' or 'provider'
+  provider_fallback_until_ms INTEGER,               -- When provider cooldown expires
+  provider_fallback_reason TEXT,                    -- Why provider fallback is active
   status TEXT DEFAULT 'created',                    -- 'created', 'active', 'completed', 'archived'
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -313,6 +317,26 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
         }
       }
     },
+  },
+  {
+    id: 24,
+    description: "Add provider_mode to session",
+    run: `ALTER TABLE session ADD COLUMN provider_mode TEXT NOT NULL DEFAULT 'cursor'`,
+  },
+  {
+    id: 25,
+    description: "Add provider_fallback_until_ms to session",
+    run: `ALTER TABLE session ADD COLUMN provider_fallback_until_ms INTEGER`,
+  },
+  {
+    id: 26,
+    description: "Add provider_fallback_reason to session",
+    run: `ALTER TABLE session ADD COLUMN provider_fallback_reason TEXT`,
+  },
+  {
+    id: 27,
+    description: "Add cursor_session_id to session",
+    run: `ALTER TABLE session ADD COLUMN cursor_session_id TEXT`,
   },
 ];
 

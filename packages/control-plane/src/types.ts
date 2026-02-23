@@ -48,6 +48,11 @@ export interface Env {
   // Sandbox lifecycle configuration
   SANDBOX_INACTIVITY_TIMEOUT_MS?: string; // Inactivity timeout in ms (default: 600000 = 10 min)
   EXECUTION_TIMEOUT_MS?: string; // Max processing time before auto-fail (default: 5400000 = 90 min)
+  CURSOR_ROUTING_ENABLED?: string; // Feature flag: "true" | "false" (default: true)
+  CURSOR_FALLBACK_ENABLED?: string; // Feature flag: "true" | "false" (default: true)
+  CURSOR_FALLBACK_COOLDOWN_MS?: string; // Provider fallback cooldown in ms (default: 900000)
+  CURSOR_CLI_ENABLED?: string; // Feature flag: "true" | "false" (default: true)
+  CURSOR_API_KEY?: string; // Cursor CLI API key for in-sandbox agent auth
 
   // Logging
   LOG_LEVEL?: string; // "debug" | "info" | "warn" | "error" (default: "info")
@@ -145,6 +150,7 @@ export type ServerMessage =
   | { type: "sandbox_restored"; message: string }
   | { type: "sandbox_warning"; message: string }
   | { type: "session_status"; status: SessionStatus }
+  | { type: "session_state"; state: SessionState }
   | { type: "session_title"; title: string | null }
   | { type: "processing_status"; isProcessing: boolean }
   | {
@@ -220,6 +226,7 @@ export type SandboxEvent =
       messageId: string;
       success: boolean;
       error?: string;
+      cursorSessionId?: string;
       sandboxId: string;
       timestamp: number;
     }
@@ -274,6 +281,9 @@ export interface SessionState {
   createdAt: number;
   model?: string;
   reasoningEffort?: string;
+  providerMode?: "cursor" | "provider";
+  providerFallbackUntilMs?: number | null;
+  providerFallbackReason?: "unsupported_model" | "cursor_429" | "cursor_quota_exhausted" | null;
   isProcessing: boolean;
 }
 
@@ -324,6 +334,10 @@ export interface SessionResponse {
   baseSha: string | null;
   currentSha: string | null;
   opencodeSessionId: string | null;
+  cursorSessionId?: string | null;
+  providerMode?: "cursor" | "provider";
+  providerFallbackUntilMs?: number | null;
+  providerFallbackReason?: "unsupported_model" | "cursor_429" | "cursor_quota_exhausted" | null;
   status: SessionStatus;
   createdAt: number;
   updatedAt: number;

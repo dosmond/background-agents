@@ -160,6 +160,7 @@ module "control_plane_worker" {
     { name = "CLOUDFLARE_AI_SEARCH_AUTORAG_NAME", value = var.cloudflare_ai_search_autorag_name },
     { name = "CONTEXT_RETRIEVAL_ENABLED", value = tostring(var.context_retrieval_enabled) },
     { name = "CONTEXT_INDEXING_ENABLED", value = tostring(var.context_indexing_enabled) },
+    { name = "CURSOR_CLI_ENABLED", value = tostring(var.cursor_cli_enabled) },
   ]
 
   secrets = [
@@ -171,6 +172,7 @@ module "control_plane_worker" {
     { name = "MODAL_API_SECRET", value = var.modal_api_secret },
     { name = "INTERNAL_CALLBACK_SECRET", value = var.internal_callback_secret },
     { name = "CLOUDFLARE_AI_SEARCH_API_TOKEN", value = var.cloudflare_ai_search_api_token },
+    { name = "CURSOR_API_KEY", value = var.cursor_api_key },
     # GitHub App credentials for /repos endpoint (listInstallationRepositories)
     { name = "GITHUB_APP_ID", value = var.github_app_id },
     { name = "GITHUB_APP_PRIVATE_KEY", value = var.github_app_private_key },

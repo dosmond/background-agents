@@ -31,6 +31,21 @@ describe("GET /internal/state", () => {
 
     expect(state.model).toBe("anthropic/claude-sonnet-4-5");
   });
+
+  it("state includes routing defaults", async () => {
+    const { stub } = await initSession();
+
+    const res = await stub.fetch("http://internal/internal/state");
+    const state = await res.json<{
+      providerMode: "cursor" | "provider";
+      providerFallbackUntilMs: number | null;
+      providerFallbackReason: string | null;
+    }>();
+
+    expect(state.providerMode).toBe("cursor");
+    expect(state.providerFallbackUntilMs).toBeNull();
+    expect(state.providerFallbackReason).toBeNull();
+  });
 });
 
 describe("POST /internal/archive", () => {
@@ -159,7 +174,9 @@ describe("POST /internal/verify-sandbox-token", () => {
     // Seed auth_token on the sandbox directly
     const authToken = "test-sandbox-auth-token-12345";
     await runInDurableObject(stub, (instance: SessionDO) => {
-      instance.ctx.storage.sql.exec(
+      (
+        instance as unknown as { ctx: { storage: { sql: { exec: (...args: unknown[]) => void } } } }
+      ).ctx.storage.sql.exec(
         "UPDATE sandbox SET auth_token = ?, auth_token_hash = NULL WHERE id = (SELECT id FROM sandbox LIMIT 1)",
         authToken
       );

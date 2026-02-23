@@ -43,8 +43,12 @@ function createMockSession(overrides: Partial<SessionRow> = {}): SessionRow {
     base_sha: null,
     current_sha: null,
     opencode_session_id: null,
+    cursor_session_id: null,
     model: "anthropic/claude-sonnet-4-5",
     reasoning_effort: null,
+    provider_mode: "cursor",
+    provider_fallback_until_ms: null,
+    provider_fallback_reason: null,
     status: "active",
     created_at: Date.now() - 60000,
     updated_at: Date.now(),
@@ -302,7 +306,11 @@ describe("SandboxLifecycleManager", () => {
 
       await manager.spawnSandbox();
 
-      expect(provider.createSandbox).toHaveBeenCalledWith(expect.objectContaining({ userEnvVars }));
+      expect(provider.createSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userEnvVars: expect.objectContaining(userEnvVars),
+        })
+      );
     });
 
     it("passes MCP config to provider", async () => {

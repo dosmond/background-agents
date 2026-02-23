@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   DEFAULT_MODEL,
+  CURSOR_SUPPORTED_MODELS,
   normalizeModelId,
   isValidModel,
+  isCursorSupportedModel,
   extractProviderAndModel,
   getValidModelOrDefault,
   supportsReasoning,
@@ -15,6 +17,14 @@ describe("model utilities", () => {
   describe("DEFAULT_MODEL", () => {
     it("is a valid model", () => {
       expect(isValidModel(DEFAULT_MODEL)).toBe(true);
+    });
+  });
+
+  describe("CURSOR_SUPPORTED_MODELS", () => {
+    it("contains only valid models", () => {
+      for (const model of CURSOR_SUPPORTED_MODELS) {
+        expect(isValidModel(model)).toBe(true);
+      }
     });
   });
 
@@ -398,6 +408,21 @@ describe("model utilities", () => {
       expect(normalizeModelId("gpt-4")).toBe("gpt-4");
       expect(normalizeModelId("invalid")).toBe("invalid");
       expect(normalizeModelId("")).toBe("");
+    });
+  });
+
+  describe("isCursorSupportedModel", () => {
+    it("returns true for static cursor-supported models", () => {
+      expect(isCursorSupportedModel("openai/gpt-5.2")).toBe(true);
+      expect(isCursorSupportedModel("openai/gpt-5.2-codex")).toBe(true);
+      expect(isCursorSupportedModel("openai/gpt-5.3-codex")).toBe(true);
+      expect(isCursorSupportedModel("openai/gpt-5.3-codex-spark")).toBe(true);
+    });
+
+    it("returns false for models outside cursor-supported set", () => {
+      expect(isCursorSupportedModel("anthropic/claude-sonnet-4-6")).toBe(false);
+      expect(isCursorSupportedModel("opencode/kimi-k2.5")).toBe(false);
+      expect(isCursorSupportedModel("invalid-model")).toBe(false);
     });
   });
 });

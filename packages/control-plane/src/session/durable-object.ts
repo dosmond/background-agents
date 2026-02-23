@@ -69,6 +69,11 @@ import { SessionMessageQueue } from "./message-queue";
 import { SessionSandboxEventProcessor } from "./sandbox-events";
 import { SessionIndexStore } from "../db/session-index";
 import { MAX_SESSION_TITLE_LENGTH, trimSessionTitle } from "@open-inspect/shared";
+import {
+  DEFAULT_CURSOR_FALLBACK_COOLDOWN_MS,
+  type ProviderFallbackReason,
+  type ProviderMode,
+} from "./routing-policy";
 
 /**
  * Valid event types for filtering.
@@ -294,6 +299,22 @@ export class SessionDO extends DurableObject<Env> {
     return parseInt(this.env.EXECUTION_TIMEOUT_MS || String(DEFAULT_EXECUTION_TIMEOUT_MS), 10);
   }
 
+  private get cursorRoutingEnabled(): boolean {
+    return this.env.CURSOR_ROUTING_ENABLED !== "false";
+  }
+
+  private get cursorFallbackEnabled(): boolean {
+    return this.env.CURSOR_FALLBACK_ENABLED !== "false";
+  }
+
+  private get cursorFallbackCooldownMs(): number {
+    const parsed = parseInt(
+      this.env.CURSOR_FALLBACK_COOLDOWN_MS || String(DEFAULT_CURSOR_FALLBACK_COOLDOWN_MS),
+      10
+    );
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CURSOR_FALLBACK_COOLDOWN_MS;
+  }
+
   private get messageQueue(): SessionMessageQueue {
     if (!this._messageQueue) {
       this._messageQueue = new SessionMessageQueue({
@@ -308,6 +329,15 @@ export class SessionDO extends DurableObject<Env> {
         getClientInfo: (ws) => this.getClientInfo(ws),
         validateReasoningEffort: (model, effort) => this.validateReasoningEffort(model, effort),
         getSession: () => this.getSession(),
+        getCursorRoutingEnabled: () => this.cursorRoutingEnabled,
+        getCursorFallbackEnabled: () => this.cursorFallbackEnabled,
+        getCursorFallbackCooldownMs: () => this.cursorFallbackCooldownMs,
+        updateRoutingState: (providerMode, providerFallbackUntilMs, providerFallbackReason) =>
+          this.updateSessionRoutingState(
+            providerMode,
+            providerFallbackUntilMs,
+            providerFallbackReason
+          ),
         updateLastActivity: (timestamp) => this.updateLastActivity(timestamp),
         spawnSandbox: () => this.spawnSandbox(),
         broadcast: (message) => this.broadcast(message),
@@ -340,6 +370,14 @@ export class SessionDO extends DurableObject<Env> {
         updateLastActivity: (timestamp) => this.updateLastActivity(timestamp),
         scheduleInactivityCheck: () => this.scheduleInactivityCheck(),
         processMessageQueue: () => this.messageQueue.processMessageQueue(),
+        getCursorFallbackEnabled: () => this.cursorFallbackEnabled,
+        getCursorFallbackCooldownMs: () => this.cursorFallbackCooldownMs,
+        updateRoutingState: (providerMode, providerFallbackUntilMs, providerFallbackReason) =>
+          this.updateSessionRoutingState(
+            providerMode,
+            providerFallbackUntilMs,
+            providerFallbackReason
+          ),
       });
     }
 
@@ -444,6 +482,8 @@ export class SessionDO extends DurableObject<Env> {
       controlPlaneUrl,
       model: DEFAULT_MODEL,
       sessionId,
+      cursorCliEnabled: this.env.CURSOR_CLI_ENABLED !== "false",
+      cursorApiKey: this.env.CURSOR_API_KEY,
       inactivity: {
         ...DEFAULT_LIFECYCLE_CONFIG.inactivity,
         timeoutMs: parseInt(this.env.SANDBOX_INACTIVITY_TIMEOUT_MS || "600000", 10),
@@ -1207,8 +1247,25 @@ export class SessionDO extends DurableObject<Env> {
       createdAt: session?.created_at ?? Date.now(),
       model: session?.model ?? DEFAULT_MODEL,
       reasoningEffort: session?.reasoning_effort ?? undefined,
+      providerMode: session?.provider_mode ?? "cursor",
+      providerFallbackUntilMs: session?.provider_fallback_until_ms ?? null,
+      providerFallbackReason: session?.provider_fallback_reason ?? null,
       isProcessing,
     };
+  }
+
+  private updateSessionRoutingState(
+    providerMode: ProviderMode,
+    providerFallbackUntilMs: number | null,
+    providerFallbackReason: ProviderFallbackReason | null
+  ): void {
+    this.repository.updateSessionRoutingState(
+      providerMode,
+      providerFallbackUntilMs,
+      providerFallbackReason,
+      Date.now()
+    );
+    this.broadcast({ type: "session_state", state: this.getSessionState() });
   }
 
   /**
@@ -1529,6 +1586,10 @@ export class SessionDO extends DurableObject<Env> {
       repoId: body.repoId ?? null,
       model,
       reasoningEffort,
+      cursorSessionId: null,
+      providerMode: "cursor",
+      providerFallbackUntilMs: null,
+      providerFallbackReason: null,
       status: "created",
       createdAt: now,
       updatedAt: now,
@@ -1582,9 +1643,13 @@ export class SessionDO extends DurableObject<Env> {
       baseSha: session.base_sha,
       currentSha: session.current_sha,
       opencodeSessionId: session.opencode_session_id,
+      cursorSessionId: session.cursor_session_id ?? null,
       status: session.status,
       model: session.model,
       reasoningEffort: session.reasoning_effort ?? undefined,
+      providerMode: session.provider_mode ?? "cursor",
+      providerFallbackUntilMs: session.provider_fallback_until_ms ?? null,
+      providerFallbackReason: session.provider_fallback_reason ?? null,
       createdAt: session.created_at,
       updatedAt: session.updated_at,
       sandbox: sandbox

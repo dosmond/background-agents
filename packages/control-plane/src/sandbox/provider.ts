@@ -155,7 +155,7 @@ export interface SnapshotResult {
  *
  * Transient errors (do NOT count toward circuit breaker):
  * - ETIMEDOUT, ECONNRESET, ECONNREFUSED
- * - HTTP 502, 503, 504 (Bad Gateway, Service Unavailable, Gateway Timeout)
+ * - HTTP 429, 502, 503, 504 (rate limit/gateway/availability issues)
  * - "fetch failed" / network errors
  *
  * Permanent errors (DO count toward circuit breaker):
@@ -189,7 +189,7 @@ export class SandboxProviderError extends Error {
    * Check if an HTTP status code indicates a transient error.
    */
   static isTransientStatus(status: number): boolean {
-    return status === 502 || status === 503 || status === 504;
+    return status === 429 || status === 502 || status === 503 || status === 504;
   }
 
   /**
@@ -204,7 +204,9 @@ export class SandboxProviderError extends Error {
         message.includes("econnreset") ||
         message.includes("econnrefused") ||
         message.includes("network") ||
-        message.includes("timeout")
+        message.includes("timeout") ||
+        message.includes("rate limit") ||
+        message.includes("429")
       );
     }
     return false;

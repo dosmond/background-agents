@@ -23,6 +23,8 @@ interface SessionState {
   createdAt: number;
   model?: string;
   reasoningEffort?: string;
+  providerMode?: "cursor" | "provider";
+  providerFallbackReason?: "unsupported_model" | "cursor_429" | "cursor_quota_exhausted" | null;
 }
 
 interface Participant {
@@ -84,6 +86,8 @@ export function SessionRightSidebarContent({
           createdAt={sessionState.createdAt}
           model={sessionState.model}
           reasoningEffort={sessionState.reasoningEffort}
+          providerMode={sessionState.providerMode}
+          providerFallbackReason={sessionState.providerFallbackReason}
           branchName={sessionState.branchName || undefined}
           repoOwner={sessionState.repoOwner}
           repoName={sessionState.repoName}

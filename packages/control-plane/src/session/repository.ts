@@ -23,6 +23,7 @@ import type {
   ArtifactType,
   SandboxEvent,
 } from "../types";
+import type { ProviderFallbackReason, ProviderMode } from "./routing-policy";
 
 type TokenEvent = Extract<SandboxEvent, { type: "token" }>;
 type ExecutionCompleteEvent = Extract<SandboxEvent, { type: "execution_complete" }>;
@@ -63,6 +64,10 @@ export interface UpsertSessionData {
   repoId?: number | null;
   model: string;
   reasoningEffort?: string | null;
+  cursorSessionId?: string | null;
+  providerMode?: ProviderMode;
+  providerFallbackUntilMs?: number | null;
+  providerFallbackReason?: ProviderFallbackReason | null;
   status: SessionStatus;
   createdAt: number;
   updatedAt: number;
@@ -216,8 +221,8 @@ export class SessionRepository {
 
   upsertSession(data: UpsertSessionData): void {
     this.sql.exec(
-      `INSERT OR REPLACE INTO session (id, session_name, title, repo_owner, repo_name, repo_id, model, reasoning_effort, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO session (id, session_name, title, repo_owner, repo_name, repo_id, model, reasoning_effort, cursor_session_id, provider_mode, provider_fallback_until_ms, provider_fallback_reason, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       data.id,
       data.sessionName,
       data.title,
@@ -226,9 +231,40 @@ export class SessionRepository {
       data.repoId ?? null,
       data.model,
       data.reasoningEffort ?? null,
+      data.cursorSessionId ?? null,
+      data.providerMode ?? "cursor",
+      data.providerFallbackUntilMs ?? null,
+      data.providerFallbackReason ?? null,
       data.status,
       data.createdAt,
       data.updatedAt
+    );
+  }
+
+  updateSessionCursorSessionId(cursorSessionId: string | null, updatedAt: number): void {
+    this.sql.exec(
+      `UPDATE session
+       SET cursor_session_id = ?, updated_at = ?
+       WHERE id = (SELECT id FROM session LIMIT 1)`,
+      cursorSessionId,
+      updatedAt
+    );
+  }
+
+  updateSessionRoutingState(
+    providerMode: ProviderMode,
+    providerFallbackUntilMs: number | null,
+    providerFallbackReason: ProviderFallbackReason | null,
+    updatedAt: number
+  ): void {
+    this.sql.exec(
+      `UPDATE session
+       SET provider_mode = ?, provider_fallback_until_ms = ?, provider_fallback_reason = ?, updated_at = ?
+       WHERE id = (SELECT id FROM session LIMIT 1)`,
+      providerMode,
+      providerFallbackUntilMs,
+      providerFallbackReason,
+      updatedAt
     );
   }
 

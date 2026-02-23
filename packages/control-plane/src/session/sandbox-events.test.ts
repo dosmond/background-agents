@@ -15,6 +15,7 @@ function createProcessor() {
     ),
     updateSandboxGitSyncStatus: vi.fn(),
     updateSessionCurrentSha: vi.fn(),
+    updateSessionCursorSessionId: vi.fn(),
   };
 
   const callbackService = {
@@ -33,6 +34,9 @@ function createProcessor() {
   const processMessageQueue = vi.fn(async () => {});
   const updateLastActivity = vi.fn();
   const getIsProcessing = vi.fn(() => false);
+  const getCursorFallbackEnabled = vi.fn(() => true);
+  const getCursorFallbackCooldownMs = vi.fn(() => 15 * 60 * 1000);
+  const updateRoutingState = vi.fn();
   const waitUntil = vi.fn();
 
   const processor = new SessionSandboxEventProcessor({
@@ -53,6 +57,9 @@ function createProcessor() {
     updateLastActivity,
     scheduleInactivityCheck,
     processMessageQueue,
+    getCursorFallbackEnabled,
+    getCursorFallbackCooldownMs,
+    updateRoutingState,
   });
 
   return {
@@ -64,6 +71,9 @@ function createProcessor() {
     triggerSnapshot,
     scheduleInactivityCheck,
     processMessageQueue,
+    getCursorFallbackEnabled,
+    getCursorFallbackCooldownMs,
+    updateRoutingState,
     waitUntil,
   };
 }
@@ -155,6 +165,41 @@ describe("SessionSandboxEventProcessor", () => {
     expect(h.wsManager.send).toHaveBeenCalledWith(
       sandboxWs,
       expect.objectContaining({ type: "push" })
+    );
+  });
+
+  it("enables provider fallback when execution fails with hard-limit error", async () => {
+    const h = createProcessor();
+    h.repository.getProcessingMessage.mockReturnValue({ id: "msg-1" });
+
+    await h.processor.processSandboxEvent({
+      type: "execution_complete",
+      messageId: "msg-1",
+      success: false,
+      error: "HTTP 429 Too Many Requests",
+      sandboxId: "sb-1",
+      timestamp: 2000,
+    });
+
+    expect(h.updateRoutingState).toHaveBeenCalledWith("provider", expect.any(Number), "cursor_429");
+  });
+
+  it("persists cursor session id when execution completes with cursor metadata", async () => {
+    const h = createProcessor();
+    h.repository.getProcessingMessage.mockReturnValue({ id: "msg-1" });
+
+    await h.processor.processSandboxEvent({
+      type: "execution_complete",
+      messageId: "msg-1",
+      success: true,
+      cursorSessionId: "cursor-session-123",
+      sandboxId: "sb-1",
+      timestamp: 2000,
+    });
+
+    expect(h.repository.updateSessionCursorSessionId).toHaveBeenCalledWith(
+      "cursor-session-123",
+      expect.any(Number)
     );
   });
 });

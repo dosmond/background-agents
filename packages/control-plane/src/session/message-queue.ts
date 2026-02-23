@@ -16,6 +16,7 @@ import type { ParticipantService } from "./participant-service";
 import type { CallbackNotificationService } from "./callback-notification-service";
 import { getAvatarUrl } from "./participant-service";
 import { ContextRetrievalService } from "../context/context-retrieval-service";
+import { decideRouting, type ProviderFallbackReason, type ProviderMode } from "./routing-policy";
 
 interface PromptMessageData {
   content: string;
@@ -38,6 +39,14 @@ interface MessageQueueDeps {
   getClientInfo: (ws: WebSocket) => ClientInfo | null;
   validateReasoningEffort: (model: string, effort: string | undefined) => string | null;
   getSession: () => SessionRow | null;
+  getCursorRoutingEnabled: () => boolean;
+  getCursorFallbackEnabled: () => boolean;
+  getCursorFallbackCooldownMs: () => number;
+  updateRoutingState: (
+    providerMode: ProviderMode,
+    providerFallbackUntilMs: number | null,
+    providerFallbackReason: ProviderFallbackReason | null
+  ) => void;
   updateLastActivity: (timestamp: number) => void;
   spawnSandbox: () => Promise<void>;
   broadcast: (message: ServerMessage) => void;
@@ -215,6 +224,29 @@ export class SessionMessageQueue {
       message.reasoning_effort ??
       session?.reasoning_effort ??
       getDefaultReasoningEffort(resolvedModel);
+    const routingDecision = decideRouting({
+      model: resolvedModel,
+      nowMs: now,
+      cursorRoutingEnabled: this.deps.getCursorRoutingEnabled(),
+      existingState: {
+        providerMode: session?.provider_mode ?? "cursor",
+        providerFallbackUntilMs: session?.provider_fallback_until_ms ?? null,
+        providerFallbackReason: session?.provider_fallback_reason ?? null,
+      },
+    });
+    const shouldUpdateRoutingState =
+      routingDecision.nextState.providerMode !== (session?.provider_mode ?? "cursor") ||
+      routingDecision.nextState.providerFallbackUntilMs !==
+        (session?.provider_fallback_until_ms ?? null) ||
+      routingDecision.nextState.providerFallbackReason !==
+        (session?.provider_fallback_reason ?? null);
+    if (shouldUpdateRoutingState) {
+      this.deps.updateRoutingState(
+        routingDecision.nextState.providerMode,
+        routingDecision.nextState.providerFallbackUntilMs,
+        routingDecision.nextState.providerFallbackReason
+      );
+    }
     const includeContext = this.shouldUseContext(message.callback_context);
     const enriched = includeContext
       ? await this.buildContextPrompt(
@@ -230,6 +262,8 @@ export class SessionMessageQueue {
       content: enriched.content,
       model: resolvedModel,
       reasoningEffort: resolvedEffort,
+      providerMode: routingDecision.route,
+      cursorSessionId: session?.cursor_session_id ?? null,
       author: {
         userId: author?.user_id ?? "unknown",
         scmName: author?.scm_name ?? null,
@@ -249,6 +283,8 @@ export class SessionMessageQueue {
       author_id: message.author_id,
       user_id: author?.user_id ?? "unknown",
       source: message.source,
+      provider_mode: routingDecision.route,
+      provider_fallback_reason: routingDecision.nextState.providerFallbackReason,
       has_sandbox_ws: true,
       sandbox_ready_state: sandboxWs.readyState,
       queue_wait_ms: now - message.created_at,

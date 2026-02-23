@@ -108,6 +108,13 @@ linear_webhook_secret = ""   # Webhook Signing Secret from the application confi
 # From: https://console.anthropic.com/
 anthropic_api_key = ""
 
+# Cursor API key for Cursor CLI in sandbox runtime
+# From: https://cursor.com/dashboard?tab=integrations
+cursor_api_key = ""
+
+# Enable Cursor CLI route for cursor-routed prompts
+cursor_cli_enabled = true
+
 # =============================================================================
 # Security Secrets
 # =============================================================================

@@ -212,6 +212,19 @@ variable "anthropic_api_key" {
   sensitive   = true
 }
 
+variable "cursor_api_key" {
+  description = "Cursor API key used by Cursor CLI in sandbox runtime"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "cursor_cli_enabled" {
+  description = "Enable Cursor CLI path for cursor-routed prompts"
+  type        = bool
+  default     = true
+}
+
 # =============================================================================
 # Security Secrets
 # =============================================================================

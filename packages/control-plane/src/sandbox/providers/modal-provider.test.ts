@@ -206,6 +206,22 @@ describe("ModalSandboxProvider", () => {
         }
       });
 
+      it("classifies HTTP 429 as transient", async () => {
+        const client = createMockModalClient({
+          createSandbox: vi.fn(async () => {
+            throw new Error("Modal API error: 429 Too Many Requests");
+          }),
+        });
+        const provider = new ModalSandboxProvider(client, "test-secret");
+
+        try {
+          await provider.createSandbox(testConfig);
+        } catch (e) {
+          expect(e).toBeInstanceOf(SandboxProviderError);
+          expect((e as SandboxProviderError).errorType).toBe("transient");
+        }
+      });
+
       it("classifies 'bad gateway' (lowercase) as transient", async () => {
         const client = createMockModalClient({
           createSandbox: vi.fn(async () => {

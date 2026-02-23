@@ -45,6 +45,9 @@ export interface Session {
   baseSha: string | null;
   currentSha: string | null;
   opencodeSessionId: string | null;
+  providerMode?: "cursor" | "provider";
+  providerFallbackUntilMs?: number | null;
+  providerFallbackReason?: "unsupported_model" | "cursor_429" | "cursor_quota_exhausted" | null;
   status: SessionStatus;
   createdAt: number;
   updatedAt: number;
@@ -130,6 +133,7 @@ export interface SandboxEvent {
   status?: string;
   sha?: string;
   success?: boolean;
+  cursorSessionId?: string;
   artifactType?: string;
   url?: string;
   metadata?: Record<string, unknown>;
@@ -179,6 +183,7 @@ export type ServerMessage =
   | { type: "presence_leave"; userId: string }
   | { type: "sandbox_warming" }
   | { type: "sandbox_ready" }
+  | { type: "session_state"; state: SessionState }
   | { type: "error"; code: string; message: string };
 
 // Session state sent to clients
@@ -194,6 +199,9 @@ export interface SessionState {
   createdAt: number;
   model?: string;
   reasoningEffort?: string;
+  providerMode?: "cursor" | "provider";
+  providerFallbackUntilMs?: number | null;
+  providerFallbackReason?: "unsupported_model" | "cursor_429" | "cursor_quota_exhausted" | null;
   isProcessing?: boolean;
 }
 

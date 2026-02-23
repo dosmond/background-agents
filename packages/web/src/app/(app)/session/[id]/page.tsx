@@ -1006,6 +1006,7 @@ function SessionContent({
             <div className="hidden md:contents">
               <ConnectionStatus connected={connected} connecting={connecting} />
               <SandboxStatus status={sessionState?.sandboxStatus} />
+              <ProviderRoutingStatus providerMode={sessionState?.providerMode} />
               <ParticipantsList participants={participants} />
             </div>
           </div>
@@ -1348,6 +1349,15 @@ function SandboxStatus({ status }: { status?: string }) {
   };
 
   return <span className={`text-xs ${colors[status] || colors.pending}`}>Sandbox: {status}</span>;
+}
+
+function ProviderRoutingStatus({ providerMode }: { providerMode?: "cursor" | "provider" }) {
+  if (providerMode !== "provider") return null;
+  return (
+    <span className="text-xs text-warning" title="Using provider fallback due to Cursor limits">
+      Provider fallback
+    </span>
+  );
 }
 
 function CombinedStatusDot({

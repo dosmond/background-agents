@@ -139,6 +139,10 @@ export interface SandboxLifecycleConfig {
   sandboxTimeoutSeconds?: number;
   /** Session ID for log correlation. Optional — logs will omit sessionId if not provided. */
   sessionId?: string;
+  /** Enables Cursor CLI path in sandboxes. Defaults to true. */
+  cursorCliEnabled?: boolean;
+  /** Cursor API key injected into sandbox for Cursor CLI auth. */
+  cursorApiKey?: string;
 }
 
 /**
@@ -192,6 +196,23 @@ export class SandboxLifecycleManager {
     private readonly callbacks: LifecycleCallbacks = {}
   ) {
     this.log = config.sessionId ? log.child({ session_id: config.sessionId }) : log;
+  }
+
+  private buildSandboxEnvVars(
+    userEnvVars: Record<string, string> | undefined
+  ): Record<string, string> | undefined {
+    const merged: Record<string, string> = { ...(userEnvVars ?? {}) };
+
+    if (this.config.cursorCliEnabled !== false) {
+      merged["CURSOR_CLI_ENABLED"] = "true";
+      if (this.config.cursorApiKey) {
+        merged["CURSOR_API_KEY"] = this.config.cursorApiKey;
+      }
+    } else {
+      merged["CURSOR_CLI_ENABLED"] = "false";
+    }
+
+    return Object.keys(merged).length > 0 ? merged : undefined;
   }
 
   /**
@@ -313,7 +334,7 @@ export class SandboxLifecycleManager {
         repo_name: session.repo_name,
       });
 
-      const userEnvVars = await this.storage.getUserEnvVars();
+      const userEnvVars = this.buildSandboxEnvVars(await this.storage.getUserEnvVars());
       const mcpConfig = await this.storage.getMcpConfig();
       const { provider, model: modelId } = this.resolveProviderAndModel(session);
 
@@ -426,7 +447,7 @@ export class SandboxLifecycleManager {
         snapshot_image_id: snapshotImageId,
       });
 
-      const userEnvVars = await this.storage.getUserEnvVars();
+      const userEnvVars = this.buildSandboxEnvVars(await this.storage.getUserEnvVars());
       const mcpConfig = await this.storage.getMcpConfig();
       const { provider, model: modelId } = this.resolveProviderAndModel(session);
 

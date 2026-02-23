@@ -23,8 +23,8 @@ SANDBOX_DIR = Path(__file__).parent.parent / "sandbox"
 OPENCODE_VERSION = "latest"
 
 # Cache buster - change this to force Modal image rebuild
-# v39: Install gh CLI for agent-direct GitHub interaction
-CACHE_BUSTER = "v39-gh-cli"
+# v40: Install Cursor Agent CLI for cursor-routed prompts
+CACHE_BUSTER = "v40-cursor-cli"
 
 # Base image with all development tools
 base_image = (
@@ -104,6 +104,11 @@ base_image = (
         # This ensures tools can import the plugin without needing to run bun add
         "npm install -g @opencode-ai/plugin@latest zod",
     )
+    # Install Cursor Agent CLI for Cursor-routed prompt execution
+    .run_commands(
+        "curl https://cursor.com/install -fsS | bash",
+        "agent --version || echo 'Cursor CLI installed'",
+    )
     # Install Playwright browsers (Chromium only to save space)
     .run_commands(
         "playwright install chromium",
@@ -122,7 +127,7 @@ base_image = (
             "HOME": "/root",
             "NODE_ENV": "development",
             "PNPM_HOME": "/root/.local/share/pnpm",
-            "PATH": "/root/.bun/bin:/root/.local/share/pnpm:/usr/local/bin:/usr/bin:/bin",
+            "PATH": "/root/.local/bin:/root/.bun/bin:/root/.local/share/pnpm:/usr/local/bin:/usr/bin:/bin",
             "PLAYWRIGHT_BROWSERS_PATH": "/root/.cache/ms-playwright",
             "PYTHONPATH": "/app",
             "SANDBOX_VERSION": CACHE_BUSTER,

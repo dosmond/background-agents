@@ -6,6 +6,11 @@ import { shouldPersistToolCallEvent } from "./event-persistence";
 import type { SessionRepository } from "./repository";
 import type { CallbackNotificationService } from "./callback-notification-service";
 import type { SessionWebSocketManager } from "./websocket-manager";
+import {
+  classifyHardLimitFallbackReason,
+  type ProviderFallbackReason,
+  type ProviderMode,
+} from "./routing-policy";
 
 type PushResolver = { resolve: () => void; reject: (err: Error) => void };
 
@@ -21,6 +26,13 @@ interface SessionSandboxEventProcessorDeps {
   updateLastActivity: (timestamp: number) => void;
   scheduleInactivityCheck: () => Promise<void>;
   processMessageQueue: () => Promise<void>;
+  getCursorFallbackEnabled: () => boolean;
+  getCursorFallbackCooldownMs: () => number;
+  updateRoutingState: (
+    providerMode: ProviderMode,
+    providerFallbackUntilMs: number | null,
+    providerFallbackReason: ProviderFallbackReason | null
+  ) => void;
 }
 
 export class SessionSandboxEventProcessor {
@@ -91,6 +103,23 @@ export class SessionSandboxEventProcessor {
     }
 
     if (event.type === "execution_complete") {
+      if (event.cursorSessionId) {
+        this.deps.repository.updateSessionCursorSessionId(event.cursorSessionId, now);
+      }
+
+      if (!event.success && this.deps.getCursorFallbackEnabled()) {
+        const fallbackReason = classifyHardLimitFallbackReason(event.error);
+        if (fallbackReason) {
+          const fallbackUntilMs = now + this.deps.getCursorFallbackCooldownMs();
+          this.deps.updateRoutingState("provider", fallbackUntilMs, fallbackReason);
+          this.deps.log.warn("cursor hard limit detected, enabling provider fallback cooldown", {
+            fallback_reason: fallbackReason,
+            fallback_until_ms: fallbackUntilMs,
+            message_id: messageId,
+          });
+        }
+      }
+
       if (messageId) {
         this.deps.repository.upsertExecutionCompleteEvent(messageId, event, now);
       }

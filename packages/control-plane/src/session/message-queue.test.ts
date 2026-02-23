@@ -35,8 +35,12 @@ function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
     base_sha: null,
     current_sha: null,
     opencode_session_id: null,
+    cursor_session_id: null,
     model: "anthropic/claude-haiku-4-5",
     reasoning_effort: null,
+    provider_mode: "cursor",
+    provider_fallback_until_ms: null,
+    provider_fallback_reason: null,
     status: "active",
     created_at: 1000,
     updated_at: 1000,
@@ -127,6 +131,10 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
     getClientInfo: options?.getClientInfo ?? (() => createClientInfo()),
     validateReasoningEffort: vi.fn(() => null),
     getSession: vi.fn(() => createSession()),
+    getCursorRoutingEnabled: vi.fn(() => true),
+    getCursorFallbackEnabled: vi.fn(() => true),
+    getCursorFallbackCooldownMs: vi.fn(() => 15 * 60 * 1000),
+    updateRoutingState: vi.fn(),
     updateLastActivity,
     spawnSandbox,
     broadcast,
@@ -190,7 +198,12 @@ describe("SessionMessageQueue", () => {
     );
     expect(h.wsManager.send).toHaveBeenCalledWith(
       sandboxWs,
-      expect.objectContaining({ type: "prompt", messageId: "msg-42" })
+      expect.objectContaining({
+        type: "prompt",
+        messageId: "msg-42",
+        providerMode: "provider",
+        cursorSessionId: null,
+      })
     );
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: true });
   });

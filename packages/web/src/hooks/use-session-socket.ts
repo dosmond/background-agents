@@ -51,6 +51,9 @@ interface SessionState {
   createdAt: number;
   model?: string;
   reasoningEffort?: string;
+  providerMode?: "cursor" | "provider";
+  providerFallbackUntilMs?: number | null;
+  providerFallbackReason?: "unsupported_model" | "cursor_429" | "cursor_quota_exhausted" | null;
   isProcessing: boolean;
 }
 
@@ -355,6 +358,12 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
         case "session_status":
           if (data.status) {
             setSessionState((prev) => (prev ? { ...prev, status: data.status! } : null));
+          }
+          break;
+
+        case "session_state":
+          if (data.state) {
+            setSessionState(data.state);
           }
           break;
 

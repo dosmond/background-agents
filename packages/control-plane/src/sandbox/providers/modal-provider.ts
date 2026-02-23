@@ -219,8 +219,8 @@ export class ModalSandboxProvider implements SandboxProvider {
    * Uses status code directly for accurate transient/permanent classification.
    */
   private classifyErrorWithStatus(message: string, status: number): SandboxProviderError {
-    // Transient: 502, 503, 504 (gateway/availability issues)
-    if (status === 502 || status === 503 || status === 504) {
+    // Transient: 429 and gateway/availability issues
+    if (status === 429 || status === 502 || status === 503 || status === 504) {
       return new SandboxProviderError(message, "transient");
     }
 
@@ -244,6 +244,8 @@ export class ModalSandboxProvider implements SandboxProvider {
         errorMessage.includes("econnrefused") ||
         errorMessage.includes("network") ||
         errorMessage.includes("timeout") ||
+        errorMessage.includes("429") ||
+        errorMessage.includes("rate limit") ||
         errorMessage.includes("502") ||
         errorMessage.includes("503") ||
         errorMessage.includes("504") ||

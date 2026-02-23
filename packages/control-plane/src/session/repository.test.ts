@@ -99,10 +99,38 @@ describe("SessionRepository", () => {
         null,
         "claude-sonnet-4",
         null,
+        null,
+        "cursor",
+        null,
+        null,
         "created",
         1000,
         2000,
       ]);
+    });
+  });
+
+  describe("updateSessionCursorSessionId", () => {
+    it("updates cursor session ID and timestamp", () => {
+      repo.updateSessionCursorSessionId("cursor-session-1", 3000);
+
+      expect(mock.calls.length).toBe(1);
+      expect(mock.calls[0].query).toContain("UPDATE session");
+      expect(mock.calls[0].query).toContain("cursor_session_id");
+      expect(mock.calls[0].params).toEqual(["cursor-session-1", 3000]);
+    });
+  });
+
+  describe("updateSessionRoutingState", () => {
+    it("updates provider mode, fallback metadata, and timestamp", () => {
+      repo.updateSessionRoutingState("provider", 9999, "cursor_429", 3000);
+
+      expect(mock.calls.length).toBe(1);
+      expect(mock.calls[0].query).toContain("UPDATE session");
+      expect(mock.calls[0].query).toContain("provider_mode");
+      expect(mock.calls[0].query).toContain("provider_fallback_until_ms");
+      expect(mock.calls[0].query).toContain("provider_fallback_reason");
+      expect(mock.calls[0].params).toEqual(["provider", 9999, "cursor_429", 3000]);
     });
   });
 
