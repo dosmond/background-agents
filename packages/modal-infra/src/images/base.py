@@ -114,6 +114,11 @@ base_image = (
         "playwright install chromium",
         "playwright install-deps chromium",
     )
+    # Install Doppler CLI
+    .run_commands(
+        "curl -fsSL https://cli.doppler.com/install.sh | bash",
+        "doppler --version || echo 'Doppler CLI installed'",
+    )
     # Create working directories
     .run_commands(
         "mkdir -p /workspace",
