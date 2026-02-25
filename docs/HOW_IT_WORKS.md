@@ -61,7 +61,7 @@ if needed.
 | ------------- | ------------------------------------------------- |
 | Messages      | Prompts you've sent and their metadata            |
 | Events        | Tool calls, token streams, status updates         |
-| Artifacts     | PRs created, screenshots captured                 |
+| Artifacts     | PRs, screenshots, previews, proof recordings      |
 | Participants  | Users who have joined the session                 |
 | Sandbox state | Reference to the current sandbox and its snapshot |
 
@@ -259,8 +259,8 @@ Here's what happens when you send a prompt:
 6. **Control plane broadcasts**: Events are stored in the session database and broadcast to all
    connected clients in real-time.
 
-7. **Artifacts are created**: If the agent creates a PR or captures a screenshot, these are stored
-   as artifacts and announced to clients.
+7. **Artifacts are created**: If the agent creates a PR, captures a screenshot, or uploads a proof
+   recording clip, these are stored as artifacts and announced to clients.
 
 ### Prompt Queuing
 
@@ -327,9 +327,12 @@ Sessions stream events to all connected clients via WebSocket.
 | `sandbox_spawning` | Sandbox is being created                      |
 | `sandbox_ready`    | Sandbox is ready to accept prompts            |
 | `sandbox_event`    | Tool call, token stream, or other agent event |
-| `artifact_created` | PR created, screenshot captured               |
+| `artifact_created` | Artifact created (PR, screenshot, recording)  |
 | `presence_update`  | User joined or left the session               |
 | `session_status`   | Session state changed                         |
+
+Proof recordings are stored in private object storage, streamed through session-authorized API
+routes, and treated as 7-day artifacts by default.
 
 ### Multiplayer
 

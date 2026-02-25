@@ -830,6 +830,24 @@ describe("SessionRepository", () => {
         1000,
       ]);
     });
+
+    it("stores recording artifact metadata", () => {
+      repo.createArtifact({
+        id: "art-recording-1",
+        type: "recording",
+        url: "/api/sessions/sess-1/artifacts/content?key=abc",
+        metadata: '{"durationMs":2000,"mimeType":"video/webm"}',
+        createdAt: 1200,
+      });
+
+      expect(mock.calls[0].params).toEqual([
+        "art-recording-1",
+        "recording",
+        "/api/sessions/sess-1/artifacts/content?key=abc",
+        '{"durationMs":2000,"mimeType":"video/webm"}',
+        1200,
+      ]);
+    });
   });
 
   describe("listArtifacts", () => {

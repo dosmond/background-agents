@@ -21,6 +21,7 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, ClassVar
+from urllib.parse import quote
 
 import httpx
 import websockets
@@ -133,6 +134,10 @@ class AgentBridge:
     PROMPT_MAX_DURATION = 5400.0
     CURSOR_REQUEST_TIMEOUT = 5400.0
     CURSOR_STDOUT_IDLE_LOG_SECONDS = 30.0
+    PROOF_RECORDING_MAX_DURATION_SECONDS = 120.0
+    PROOF_RECORDING_UPLOAD_TIMEOUT_SECONDS = 120.0
+    PROOF_RECORDING_WIDTH = 1280
+    PROOF_RECORDING_HEIGHT = 720
     MAX_PENDING_PART_EVENTS = 2000
     MAX_EVENT_BUFFER_SIZE = 1000
     CRITICAL_EVENT_TYPES: ClassVar[set[str]] = {
@@ -513,6 +518,9 @@ class AgentBridge:
         model = cmd.get("model")
         reasoning_effort = cmd.get("reasoningEffort")
         provider_mode = cmd.get("providerMode") or cmd.get("provider_mode") or "provider"
+        proof_recording_requested = bool(
+            cmd.get("proofRecordingRequested") or cmd.get("proof_recording_requested")
+        )
         cursor_session_id = cmd.get("cursorSessionId") or cmd.get("cursor_session_id")
         if isinstance(cursor_session_id, str) and cursor_session_id.strip():
             self.cursor_session_id = cursor_session_id.strip()
@@ -520,12 +528,16 @@ class AgentBridge:
         author_data = cmd.get("author", {})
         start_time = time.time()
         outcome = "success"
+        had_error = False
+        error_message: str | None = None
+        proof_recording_state: dict[str, Any] | None = None
 
         self.log.info(
             "prompt.start",
             message_id=message_id,
             model=model,
             reasoning_effort=reasoning_effort,
+            proof_recording_requested=proof_recording_requested,
         )
 
         scm_name = author_data.get("scmName")
@@ -538,9 +550,10 @@ class AgentBridge:
                 )
             )
 
+        if proof_recording_requested:
+            proof_recording_state = await self._start_proof_recording(message_id, content)
+
         try:
-            had_error = False
-            error_message = None
             cursor_cli_enabled = os.environ.get("CURSOR_CLI_ENABLED", "true") != "false"
             use_cursor_cli = provider_mode == "cursor" and cursor_cli_enabled
             if provider_mode == "cursor" and not cursor_cli_enabled:
@@ -561,6 +574,8 @@ class AgentBridge:
                 if event.get("type") == "error":
                     had_error = True
                     error_message = event.get("error")
+                if proof_recording_state:
+                    await self._append_proof_recording_event(proof_recording_state, event)
                 await self._send_event(event)
 
             if had_error:
@@ -583,6 +598,8 @@ class AgentBridge:
         except Exception as e:
             outcome = "error"
             self.log.error("prompt.error", exc=e, message_id=message_id)
+            had_error = True
+            error_message = str(e)
             await self._send_event(
                 {
                     "type": "execution_complete",
@@ -592,6 +609,16 @@ class AgentBridge:
                 }
             )
         finally:
+            if proof_recording_state:
+                artifact_event = await self._finalize_proof_recording(
+                    proof_recording_state=proof_recording_state,
+                    message_id=message_id,
+                    success=not had_error,
+                    error_message=error_message,
+                )
+                if artifact_event:
+                    await self._send_event(artifact_event)
+
             duration_ms = int((time.time() - start_time) * 1000)
             self.log.info(
                 "prompt.run",
@@ -609,6 +636,346 @@ class AgentBridge:
         if repo_dirs:
             return repo_dirs[0].parent
         return self.repo_path
+
+    @staticmethod
+    def _build_proof_recording_html(message_id: str, prompt_preview: str) -> str:
+        safe_preview = (
+            prompt_preview.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").strip()
+        )
+        if len(safe_preview) > 240:
+            safe_preview = f"{safe_preview[:237]}..."
+        return f"""<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Open-Inspect Proof Recording</title>
+    <style>
+      body {{
+        margin: 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        background: #0f172a;
+        color: #e2e8f0;
+      }}
+      .container {{
+        display: grid;
+        grid-template-rows: auto 1fr;
+        height: 100vh;
+      }}
+      .header {{
+        border-bottom: 1px solid #334155;
+        padding: 16px 20px;
+      }}
+      .title {{
+        font-size: 18px;
+        font-weight: 600;
+      }}
+      .meta {{
+        margin-top: 6px;
+        color: #94a3b8;
+        font-size: 12px;
+      }}
+      .prompt {{
+        margin-top: 10px;
+        color: #cbd5e1;
+        font-size: 13px;
+        white-space: pre-wrap;
+      }}
+      .events {{
+        overflow: hidden;
+        padding: 16px 20px 20px;
+      }}
+      #timeline {{
+        height: calc(100vh - 140px);
+        overflow: auto;
+        border: 1px solid #334155;
+        background: #020617;
+        padding: 12px;
+      }}
+      .line {{
+        white-space: pre-wrap;
+        font-size: 12px;
+        line-height: 1.55;
+        color: #cbd5e1;
+        margin-bottom: 8px;
+      }}
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <div class="title">Open-Inspect Proof Recording</div>
+        <div class="meta">messageId: {message_id}</div>
+        <div class="prompt">{safe_preview}</div>
+      </div>
+      <div class="events">
+        <div id="timeline"></div>
+      </div>
+    </div>
+    <script>
+      const timeline = document.getElementById("timeline");
+      window.appendEvent = (line) => {{
+        const row = document.createElement("div");
+        row.className = "line";
+        row.textContent = line;
+        timeline.appendChild(row);
+        timeline.scrollTop = timeline.scrollHeight;
+      }};
+    </script>
+  </body>
+</html>"""
+
+    async def _start_proof_recording(
+        self,
+        message_id: str,
+        prompt_content: str,
+    ) -> dict[str, Any] | None:
+        """Start an internal proof recording timeline and capture video."""
+        try:
+            from playwright.async_api import async_playwright
+
+            record_dir = Path(tempfile.gettempdir()) / "open-inspect-proof-recordings"
+            record_dir.mkdir(parents=True, exist_ok=True)
+
+            playwright = await async_playwright().start()
+            browser = await playwright.chromium.launch()
+            context = await browser.new_context(
+                record_video_dir=str(record_dir),
+                record_video_size={
+                    "width": self.PROOF_RECORDING_WIDTH,
+                    "height": self.PROOF_RECORDING_HEIGHT,
+                },
+                viewport={
+                    "width": self.PROOF_RECORDING_WIDTH,
+                    "height": self.PROOF_RECORDING_HEIGHT,
+                },
+            )
+            page = await context.new_page()
+            await page.set_content(
+                self._build_proof_recording_html(message_id, prompt_content),
+                wait_until="domcontentloaded",
+            )
+            await page.evaluate("window.appendEvent(arguments[0])", "Recording requested by user.")
+
+            self.log.info("proof.recording_started", message_id=message_id)
+            return {
+                "playwright": playwright,
+                "browser": browser,
+                "context": context,
+                "page": page,
+                "video": page.video,
+                "record_dir": record_dir,
+                "started_at": time.time(),
+                "stopped": False,
+                "timed_out": False,
+            }
+        except Exception as e:
+            self.log.warn("proof.recording_start_failed", message_id=message_id, exc=e)
+            return None
+
+    @staticmethod
+    def _format_proof_recording_event(event: dict[str, Any]) -> str | None:
+        event_type = str(event.get("type") or "")
+        if event_type == "token":
+            return None
+        if event_type == "tool_call":
+            tool = str(event.get("tool") or "tool")
+            status = str(event.get("status") or "running")
+            return f"[tool_call] {tool} ({status})"
+        if event_type == "tool_result":
+            call_id = str(event.get("callId") or "unknown")
+            has_error = bool(event.get("error"))
+            if has_error:
+                return f"[tool_result] {call_id} failed"
+            return f"[tool_result] {call_id} completed"
+        if event_type == "step_start":
+            return "[step] started"
+        if event_type == "step_finish":
+            reason = event.get("reason")
+            if isinstance(reason, str) and reason:
+                return f"[step] finished ({reason})"
+            return "[step] finished"
+        if event_type == "error":
+            return f"[error] {event.get('error') or 'unknown error'}"
+        if event_type == "execution_complete":
+            return f"[execution_complete] success={bool(event.get('success'))}"
+        return f"[event] {event_type}"
+
+    async def _append_proof_recording_event(
+        self,
+        proof_recording_state: dict[str, Any],
+        event: dict[str, Any],
+    ) -> None:
+        if proof_recording_state.get("stopped"):
+            return
+
+        elapsed = time.time() - float(proof_recording_state["started_at"])
+        if elapsed >= self.PROOF_RECORDING_MAX_DURATION_SECONDS:
+            proof_recording_state["timed_out"] = True
+            page = proof_recording_state.get("page")
+            if page:
+                with contextlib.suppress(Exception):
+                    await page.evaluate(
+                        "window.appendEvent(arguments[0])",
+                        "Recording reached 2-minute cap and was stopped.",
+                    )
+            await self._stop_proof_recording_capture(proof_recording_state)
+            return
+
+        line = self._format_proof_recording_event(event)
+        if not line:
+            return
+
+        page = proof_recording_state.get("page")
+        if not page:
+            return
+
+        try:
+            timestamp = time.strftime("%H:%M:%S", time.localtime())
+            await page.evaluate("window.appendEvent(arguments[0])", f"{timestamp} {line}")
+        except Exception:
+            # Best effort only; recording should not impact prompt execution.
+            return
+
+    async def _stop_proof_recording_capture(self, proof_recording_state: dict[str, Any]) -> None:
+        if proof_recording_state.get("stopped"):
+            return
+
+        proof_recording_state["stopped"] = True
+
+        context = proof_recording_state.get("context")
+        browser = proof_recording_state.get("browser")
+        playwright = proof_recording_state.get("playwright")
+
+        with contextlib.suppress(Exception):
+            if context:
+                await context.close()
+        with contextlib.suppress(Exception):
+            if browser:
+                await browser.close()
+        with contextlib.suppress(Exception):
+            if playwright:
+                await playwright.stop()
+
+    async def _upload_proof_recording(
+        self,
+        recording_path: Path,
+        metadata: dict[str, Any],
+    ) -> tuple[str, int, str | None] | None:
+        if not self.http_client:
+            return None
+
+        upload_url = (
+            f"{self.control_plane_url}/sessions/{self.session_id}/artifacts/upload"
+            f"?filename={quote(recording_path.name)}&mimeType={quote('video/webm')}"
+        )
+        headers = {
+            "Authorization": f"Bearer {self.auth_token}",
+            "Content-Type": "video/webm",
+            "Content-Length": str(recording_path.stat().st_size),
+            "X-Artifact-Type": "recording",
+            "X-Artifact-Metadata": json.dumps(metadata),
+        }
+
+        def iter_file_chunks(path: Path, chunk_size: int = 1024 * 1024):
+            with path.open("rb") as file:
+                while True:
+                    chunk = file.read(chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
+
+        response = await self.http_client.post(
+            upload_url,
+            headers=headers,
+            content=iter_file_chunks(recording_path),
+            timeout=httpx.Timeout(self.PROOF_RECORDING_UPLOAD_TIMEOUT_SECONDS),
+        )
+        if response.status_code >= 400:
+            self.log.warn(
+                "proof.recording_upload_failed",
+                status_code=response.status_code,
+                response=response.text,
+            )
+            return None
+
+        payload = response.json()
+        url = payload.get("url")
+        expires_at = payload.get("expiresAt")
+        storage_key = payload.get("storageKey")
+        if not isinstance(url, str) or not isinstance(expires_at, int):
+            self.log.warn("proof.recording_upload_invalid_response", payload=payload)
+            return None
+        return url, expires_at, storage_key if isinstance(storage_key, str) else None
+
+    async def _finalize_proof_recording(
+        self,
+        proof_recording_state: dict[str, Any],
+        message_id: str,
+        success: bool,
+        error_message: str | None,
+    ) -> dict[str, Any] | None:
+        page = proof_recording_state.get("page")
+        if page and not proof_recording_state.get("stopped"):
+            completion_line = (
+                "Execution completed successfully."
+                if success
+                else f"Execution failed: {error_message or 'unknown error'}"
+            )
+            with contextlib.suppress(Exception):
+                await page.evaluate("window.appendEvent(arguments[0])", completion_line)
+
+        video = proof_recording_state.get("video")
+        record_dir = proof_recording_state.get("record_dir")
+        started_at = float(proof_recording_state["started_at"])
+        duration_ms = int((time.time() - started_at) * 1000)
+        duration_ms = min(
+            duration_ms,
+            int(self.PROOF_RECORDING_MAX_DURATION_SECONDS * 1000),
+        )
+
+        await self._stop_proof_recording_capture(proof_recording_state)
+
+        if not video:
+            return None
+
+        if isinstance(record_dir, Path):
+            saved_path = record_dir / f"{message_id}-{secrets.token_hex(8)}.webm"
+        else:
+            saved_path = Path(tempfile.gettempdir()) / f"{message_id}-{secrets.token_hex(8)}.webm"
+
+        try:
+            await video.save_as(str(saved_path))
+            if not saved_path.exists():
+                self.log.warn("proof.recording_missing_file", message_id=message_id)
+                return None
+
+            upload_metadata: dict[str, Any] = {
+                "messageId": message_id,
+                "durationMs": duration_ms,
+                "mimeType": "video/webm",
+                "sizeBytes": saved_path.stat().st_size,
+                "timedOut": bool(proof_recording_state.get("timed_out")),
+            }
+            upload_result = await self._upload_proof_recording(saved_path, upload_metadata)
+            if not upload_result:
+                return None
+            url, expires_at, storage_key = upload_result
+            upload_metadata["expiresAt"] = expires_at
+            if storage_key:
+                upload_metadata["storageKey"] = storage_key
+
+            return {
+                "type": "artifact",
+                "artifactType": "recording",
+                "url": url,
+                "metadata": upload_metadata,
+            }
+        except Exception as e:
+            self.log.warn("proof.recording_finalize_failed", message_id=message_id, exc=e)
+            return None
+        finally:
+            with contextlib.suppress(OSError):
+                saved_path.unlink()
 
     @staticmethod
     def _normalize_cursor_model(model: str | None) -> str | None:

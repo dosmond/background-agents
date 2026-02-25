@@ -8,6 +8,7 @@ function createProcessor() {
     getProcessingMessage: vi.fn(() => null as { id: string } | null),
     upsertTokenEvent: vi.fn(),
     createEvent: vi.fn(),
+    createArtifact: vi.fn(),
     upsertExecutionCompleteEvent: vi.fn(),
     updateMessageCompletion: vi.fn(),
     getMessageTimestamps: vi.fn(
@@ -200,6 +201,65 @@ describe("SessionSandboxEventProcessor", () => {
     expect(h.repository.updateSessionCursorSessionId).toHaveBeenCalledWith(
       "cursor-session-123",
       expect.any(Number)
+    );
+  });
+
+  it("creates and broadcasts artifact on artifact event", async () => {
+    const h = createProcessor();
+
+    await h.processor.processSandboxEvent({
+      type: "artifact",
+      artifactType: "recording",
+      url: "https://example.com/recordings/proof.webm",
+      metadata: { durationMs: 1234 },
+      sandboxId: "sb-1",
+      timestamp: 2000,
+    });
+
+    expect(h.repository.createArtifact).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "recording",
+        url: "https://example.com/recordings/proof.webm",
+        metadata: JSON.stringify({ durationMs: 1234 }),
+      })
+    );
+    expect(h.broadcast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "artifact_created",
+        artifact: expect.objectContaining({
+          type: "recording",
+          url: "https://example.com/recordings/proof.webm",
+          metadata: { durationMs: 1234 },
+        }),
+      })
+    );
+    expect(h.broadcast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "sandbox_event",
+        event: expect.objectContaining({
+          type: "artifact",
+        }),
+      })
+    );
+  });
+
+  it("stores null artifact url when event url is invalid", async () => {
+    const h = createProcessor();
+
+    await h.processor.processSandboxEvent({
+      type: "artifact",
+      artifactType: "recording",
+      url: "   ",
+      metadata: { durationMs: 321 },
+      sandboxId: "sb-1",
+      timestamp: 2000,
+    });
+
+    expect(h.repository.createArtifact).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "recording",
+        url: null,
+      })
     );
   });
 });

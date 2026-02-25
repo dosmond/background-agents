@@ -2,7 +2,7 @@
 
 export interface Artifact {
   id: string;
-  type: "pr" | "screenshot" | "preview" | "branch";
+  type: "pr" | "screenshot" | "preview" | "branch" | "recording";
   url: string | null;
   metadata?: {
     prNumber?: number;
@@ -14,6 +14,10 @@ export interface Artifact {
     provider?: string;
     filename?: string;
     previewStatus?: "active" | "outdated" | "stopped";
+    mimeType?: string;
+    durationMs?: number;
+    expiresAt?: number;
+    storageKey?: string;
   };
   createdAt: number;
 }

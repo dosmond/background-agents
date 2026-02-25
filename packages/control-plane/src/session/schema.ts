@@ -76,10 +76,10 @@ CREATE TABLE IF NOT EXISTS events (
   created_at INTEGER NOT NULL
 );
 
--- Artifacts (PRs, screenshots, preview URLs)
+-- Artifacts (PRs, screenshots, preview URLs, recordings)
 CREATE TABLE IF NOT EXISTS artifacts (
   id TEXT PRIMARY KEY,
-  type TEXT NOT NULL,                               -- 'pr', 'screenshot', 'preview', 'branch'
+  type TEXT NOT NULL,                               -- 'pr', 'screenshot', 'preview', 'branch', 'recording'
   url TEXT,
   metadata TEXT,                                    -- JSON
   created_at INTEGER NOT NULL

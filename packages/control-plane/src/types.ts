@@ -17,6 +17,7 @@ export interface Env {
   // D1 database
   DB: D1Database;
   CONTEXT_DOCUMENTS_BUCKET?: R2Bucket;
+  SESSION_ARTIFACTS_BUCKET?: R2Bucket;
 
   // Secrets
   GITHUB_CLIENT_ID?: string;
@@ -92,7 +93,7 @@ export type MessageSource = "web" | "slack" | "linear" | "extension" | "github";
 export type EventType = "tool_call" | "tool_result" | "token" | "error" | "git_sync";
 
 // Artifact types
-export type ArtifactType = "pr" | "screenshot" | "preview" | "branch";
+export type ArtifactType = "pr" | "screenshot" | "preview" | "branch" | "recording";
 
 // Client → Server messages
 export type ClientMessage =
@@ -145,7 +146,13 @@ export type ServerMessage =
   | { type: "error"; code: string; message: string }
   | {
       type: "artifact_created";
-      artifact: { id: string; type: string; url: string; prNumber?: number };
+      artifact: {
+        id: string;
+        type: string;
+        url: string | null;
+        metadata?: Record<string, unknown>;
+        prNumber?: number;
+      };
     }
   | { type: "snapshot_saved"; imageId: string; reason: string }
   | { type: "sandbox_restored"; message: string }

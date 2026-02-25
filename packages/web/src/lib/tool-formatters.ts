@@ -11,6 +11,14 @@ export interface SandboxEvent {
   status?: string;
   output?: string;
   sha?: string;
+  artifactType?: string;
+  url?: string;
+  metadata?: Record<string, unknown>;
+  author?: {
+    participantId: string;
+    name: string;
+    avatar?: string;
+  };
   timestamp: number;
 }
 

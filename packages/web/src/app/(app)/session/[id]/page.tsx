@@ -1461,22 +1461,7 @@ const EventItem = memo(function EventItem({
   event,
   currentParticipantId,
 }: {
-  event: {
-    type: string;
-    content?: string;
-    tool?: string;
-    args?: Record<string, unknown>;
-    result?: string;
-    error?: string;
-    success?: boolean;
-    status?: string;
-    timestamp: number;
-    author?: {
-      participantId: string;
-      name: string;
-      avatar?: string;
-    };
-  };
+  event: SandboxEvent;
   currentParticipantId: string | null;
 }) {
   const [copied, setCopied] = useState(false);
@@ -1602,6 +1587,49 @@ const EventItem = memo(function EventItem({
           <span className="w-2 h-2 rounded-full bg-accent" />
           Git sync: {event.status}
           <span className="text-xs">{time}</span>
+        </div>
+      );
+
+    case "artifact":
+      if (event.artifactType === "recording" && event.url) {
+        return (
+          <div className="bg-card p-4 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted-foreground">Proof recording</span>
+              <span className="text-xs text-secondary-foreground">{time}</span>
+            </div>
+            <video
+              controls
+              preload="metadata"
+              className="w-full rounded border border-border-muted bg-black"
+              src={event.url}
+            />
+            {typeof event.metadata?.durationMs === "number" && (
+              <p className="text-xs text-muted-foreground">
+                Duration: {Math.max(1, Math.round(event.metadata.durationMs / 1000))}s
+              </p>
+            )}
+          </div>
+        );
+      }
+      return (
+        <div className="bg-card p-4 space-y-1">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-muted-foreground">
+              Artifact: {event.artifactType || "unknown"}
+            </span>
+            <span className="text-xs text-secondary-foreground">{time}</span>
+          </div>
+          {event.url && (
+            <a
+              href={event.url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-xs text-accent hover:underline break-all"
+            >
+              {event.url}
+            </a>
+          )}
         </div>
       );
 

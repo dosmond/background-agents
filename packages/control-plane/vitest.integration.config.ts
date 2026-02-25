@@ -40,6 +40,7 @@ export default defineWorkersConfig(async () => {
               MODAL_WORKSPACE: "test-workspace",
               TEST_MIGRATIONS: migrations,
             },
+            r2Buckets: ["SESSION_ARTIFACTS_BUCKET"],
           },
         },
       },

@@ -18,6 +18,19 @@ import { getAvatarUrl } from "./participant-service";
 import { ContextRetrievalService } from "../context/context-retrieval-service";
 import { decideRouting, type ProviderFallbackReason, type ProviderMode } from "./routing-policy";
 
+const PROOF_RECORDING_TERMS = /\b(record|recording|capture|video|screen\s*record(?:ing)?)\b/i;
+const PROOF_VALIDATION_TERMS = /\b(proof|evidence|verify|verification|test|tested|testing|qa)\b/i;
+const PROOF_REQUEST_TERMS = /\b(show|share|send|give|return|provide|include)\b/i;
+
+function isProofRecordingRequested(content: string): boolean {
+  if (!content.trim()) return false;
+
+  const mentionsRecording = PROOF_RECORDING_TERMS.test(content);
+  if (!mentionsRecording) return false;
+
+  return PROOF_VALIDATION_TERMS.test(content) || PROOF_REQUEST_TERMS.test(content);
+}
+
 interface PromptMessageData {
   content: string;
   model?: string;
@@ -262,6 +275,7 @@ export class SessionMessageQueue {
       content: enriched.content,
       model: resolvedModel,
       reasoningEffort: resolvedEffort,
+      proofRecordingRequested: isProofRecordingRequested(message.content),
       providerMode: routingDecision.route,
       cursorSessionId: session?.cursor_session_id ?? null,
       author: {

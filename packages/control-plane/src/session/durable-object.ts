@@ -113,6 +113,10 @@ const WS_AUTH_TIMEOUT_MS = 30000; // 30 seconds
  * the client to fetch a fresh token on reconnect.
  */
 const WS_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const RECORDING_RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const MAX_RECORDING_UPLOAD_BYTES = 100 * 1024 * 1024; // 100 MB
+const MAX_ARTIFACT_METADATA_HEADER_BYTES = 4096; // 4 KB
+const ALLOWED_RECORDING_MIME_TYPES = new Set(["video/webm", "video/mp4"]);
 
 /**
  * Route definition for internal API endpoints.
@@ -164,6 +168,16 @@ export class SessionDO extends DurableObject<Env> {
     },
     { method: "GET", path: "/internal/events", handler: (_, url) => this.handleListEvents(url) },
     { method: "GET", path: "/internal/artifacts", handler: () => this.handleListArtifacts() },
+    {
+      method: "POST",
+      path: "/internal/artifacts/upload",
+      handler: (req, url) => this.handleUploadArtifact(req, url),
+    },
+    {
+      method: "GET",
+      path: "/internal/artifacts/content",
+      handler: (req, url) => this.handleGetArtifactContent(req, url),
+    },
     { method: "GET", path: "/internal/git/changes", handler: () => this.handleGitChanges() },
     {
       method: "GET",
@@ -1865,6 +1879,204 @@ export class SessionDO extends DurableObject<Env> {
         createdAt: a.created_at,
       })),
     });
+  }
+
+  private sanitizeArtifactFilename(filename: string): string {
+    const trimmed = filename.trim();
+    const normalized = trimmed.replace(/[^a-zA-Z0-9._-]/g, "-");
+    if (!normalized) return "recording.webm";
+    return normalized.slice(0, 120);
+  }
+
+  private async handleUploadArtifact(request: Request, url: URL): Promise<Response> {
+    const artifactBucket = this.env.SESSION_ARTIFACTS_BUCKET;
+    if (!artifactBucket) {
+      return Response.json({ error: "Artifact storage not configured" }, { status: 503 });
+    }
+
+    const artifactType = request.headers.get("X-Artifact-Type");
+    if (artifactType !== "recording") {
+      return Response.json({ error: "Only recording uploads are supported" }, { status: 400 });
+    }
+
+    const session = this.getSession();
+    if (!session) {
+      return Response.json({ error: "Session not found" }, { status: 404 });
+    }
+
+    const filename = this.sanitizeArtifactFilename(
+      url.searchParams.get("filename") || "recording.webm"
+    );
+    const mimeType = (url.searchParams.get("mimeType") || "video/webm").trim().toLowerCase();
+    if (!ALLOWED_RECORDING_MIME_TYPES.has(mimeType)) {
+      return Response.json({ error: "Unsupported recording mime type" }, { status: 400 });
+    }
+    const metadataHeader = request.headers.get("X-Artifact-Metadata");
+    if (metadataHeader && metadataHeader.length > MAX_ARTIFACT_METADATA_HEADER_BYTES) {
+      return Response.json({ error: "Artifact metadata header is too large" }, { status: 400 });
+    }
+
+    let uploadMetadata: Record<string, unknown> = {};
+    if (metadataHeader) {
+      try {
+        uploadMetadata = JSON.parse(metadataHeader) as Record<string, unknown>;
+      } catch {
+        return Response.json({ error: "Invalid artifact metadata" }, { status: 400 });
+      }
+    }
+
+    const contentLengthHeader = request.headers.get("Content-Length");
+    if (!contentLengthHeader) {
+      return Response.json({ error: "Content-Length header is required" }, { status: 411 });
+    }
+    const contentLength = Number(contentLengthHeader);
+    if (!Number.isFinite(contentLength) || contentLength <= 0) {
+      return Response.json({ error: "Invalid Content-Length header" }, { status: 400 });
+    }
+    if (contentLength > MAX_RECORDING_UPLOAD_BYTES) {
+      return Response.json({ error: "Upload exceeds maximum recording size" }, { status: 413 });
+    }
+    if (!request.body) {
+      return Response.json({ error: "Upload body is empty" }, { status: 400 });
+    }
+
+    const now = Date.now();
+    const expiresAt = now + RECORDING_RETENTION_MS;
+    const publicSessionId = session.session_name || session.id;
+    const objectKey = `${publicSessionId}/recordings/${generateId()}-${filename}`;
+    await artifactBucket.put(objectKey, request.body, {
+      httpMetadata: { contentType: mimeType },
+      customMetadata: {
+        expiresAt: String(expiresAt),
+        type: "recording",
+        uploadedAt: String(now),
+      },
+    });
+
+    this.log.info("recording.uploaded", {
+      session_id: publicSessionId,
+      key: objectKey,
+      bytes: contentLength,
+      expires_at: expiresAt,
+      has_metadata: Object.keys(uploadMetadata).length > 0,
+    });
+
+    return Response.json({
+      url: `/api/sessions/${publicSessionId}/artifacts/content?key=${encodeURIComponent(objectKey)}`,
+      storageKey: objectKey,
+      expiresAt,
+    });
+  }
+
+  private async handleGetArtifactContent(request: Request, url: URL): Promise<Response> {
+    const artifactBucket = this.env.SESSION_ARTIFACTS_BUCKET;
+    if (!artifactBucket) {
+      return Response.json({ error: "Artifact storage not configured" }, { status: 503 });
+    }
+
+    const key = url.searchParams.get("key");
+    const userId = url.searchParams.get("userId");
+    if (!key || !userId) {
+      return Response.json({ error: "key and userId are required" }, { status: 400 });
+    }
+
+    const session = this.getSession();
+    if (!session) {
+      return Response.json({ error: "Session not found" }, { status: 404 });
+    }
+    const publicSessionId = session.session_name || session.id;
+    if (key.includes("..") || !key.startsWith(`${publicSessionId}/`)) {
+      return Response.json({ error: "Invalid artifact key" }, { status: 403 });
+    }
+
+    const participant = this.participantService.getByUserId(userId);
+    if (!participant) {
+      return Response.json({ error: "Not authorized for this session" }, { status: 403 });
+    }
+
+    const objectHead = await artifactBucket.head(key);
+    if (!objectHead) {
+      return Response.json({ error: "Artifact not found" }, { status: 404 });
+    }
+
+    const objectExpiresAt = Number(objectHead.customMetadata?.expiresAt || 0);
+    if (Number.isFinite(objectExpiresAt) && objectExpiresAt > 0 && Date.now() > objectExpiresAt) {
+      await artifactBucket.delete(key);
+      return Response.json({ error: "Artifact expired" }, { status: 410 });
+    }
+
+    const contentType = objectHead.httpMetadata?.contentType || "application/octet-stream";
+    const totalSize = objectHead.size;
+    const rangeHeader = request.headers.get("Range");
+    let rangeStart: number | null = null;
+    let rangeEnd: number | null = null;
+
+    if (rangeHeader) {
+      const rangeMatch = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+      const invalidRange = () =>
+        new Response(null, {
+          status: 416,
+          headers: { "Content-Range": `bytes */${totalSize}` },
+        });
+
+      if (!rangeMatch || (!rangeMatch[1] && !rangeMatch[2])) {
+        return invalidRange();
+      }
+
+      if (rangeMatch[1]) {
+        const parsedStart = Number(rangeMatch[1]);
+        if (!Number.isFinite(parsedStart) || parsedStart < 0) return invalidRange();
+        rangeStart = parsedStart;
+      }
+
+      if (rangeMatch[2]) {
+        const parsedEnd = Number(rangeMatch[2]);
+        if (!Number.isFinite(parsedEnd) || parsedEnd < 0) return invalidRange();
+        rangeEnd = parsedEnd;
+      }
+
+      if (rangeStart === null) {
+        const suffixLength = rangeEnd ?? 0;
+        if (suffixLength <= 0) return invalidRange();
+        rangeStart = Math.max(totalSize - suffixLength, 0);
+        rangeEnd = totalSize - 1;
+      } else {
+        if (rangeEnd === null || rangeEnd >= totalSize) {
+          rangeEnd = totalSize - 1;
+        }
+      }
+
+      if (rangeStart >= totalSize || rangeStart > (rangeEnd ?? 0)) {
+        return invalidRange();
+      }
+    }
+
+    const object = await artifactBucket.get(
+      key,
+      rangeStart === null
+        ? undefined
+        : { range: { offset: rangeStart, length: (rangeEnd as number) - rangeStart + 1 } }
+    );
+    if (!object?.body) {
+      return Response.json({ error: "Artifact not found" }, { status: 404 });
+    }
+
+    const headers = new Headers({
+      "Content-Type": contentType,
+      "Cache-Control": "private, max-age=60",
+      "Accept-Ranges": "bytes",
+    });
+
+    if (rangeStart !== null) {
+      const end = rangeEnd as number;
+      const length = end - rangeStart + 1;
+      headers.set("Content-Length", String(length));
+      headers.set("Content-Range", `bytes ${rangeStart}-${end}/${totalSize}`);
+      return new Response(object.body, { status: 206, headers });
+    }
+
+    headers.set("Content-Length", String(totalSize));
+    return new Response(object.body, { status: 200, headers });
   }
 
   private async handleGitChanges(): Promise<Response> {

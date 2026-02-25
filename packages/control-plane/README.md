@@ -52,23 +52,24 @@ The control plane provides:
 
 ### Sessions
 
-| Endpoint                     | Method    | Description              |
-| ---------------------------- | --------- | ------------------------ |
-| `/sessions`                  | GET       | List user's sessions     |
-| `/sessions`                  | POST      | Create new session       |
-| `/sessions/:id`              | GET       | Get session state        |
-| `/sessions/:id`              | DELETE    | Delete session           |
-| `/sessions/:id/prompt`       | POST      | Enqueue prompt           |
-| `/sessions/:id/stop`         | POST      | Stop execution           |
-| `/sessions/:id/ws`           | WebSocket | Real-time connection     |
-| `/sessions/:id/events`       | GET       | Paginated events         |
-| `/sessions/:id/artifacts`    | GET       | List artifacts           |
-| `/sessions/:id/participants` | GET/POST  | Manage participants      |
-| `/sessions/:id/messages`     | GET       | List messages            |
-| `/sessions/:id/pr`           | POST      | Create pull request      |
-| `/sessions/:id/ws-token`     | POST      | Generate WebSocket token |
-| `/sessions/:id/archive`      | POST      | Archive session          |
-| `/sessions/:id/unarchive`    | POST      | Unarchive session        |
+| Endpoint                          | Method    | Description                     |
+| --------------------------------- | --------- | ------------------------------- |
+| `/sessions`                       | GET       | List user's sessions            |
+| `/sessions`                       | POST      | Create new session              |
+| `/sessions/:id`                   | GET       | Get session state               |
+| `/sessions/:id`                   | DELETE    | Delete session                  |
+| `/sessions/:id/prompt`            | POST      | Enqueue prompt                  |
+| `/sessions/:id/stop`              | POST      | Stop execution                  |
+| `/sessions/:id/ws`                | WebSocket | Real-time connection            |
+| `/sessions/:id/events`            | GET       | Paginated events                |
+| `/sessions/:id/artifacts`         | GET       | List artifacts                  |
+| `/sessions/:id/artifacts/content` | GET       | Stream private artifact content |
+| `/sessions/:id/participants`      | GET/POST  | Manage participants             |
+| `/sessions/:id/messages`          | GET       | List messages                   |
+| `/sessions/:id/pr`                | POST      | Create pull request             |
+| `/sessions/:id/ws-token`          | POST      | Generate WebSocket token        |
+| `/sessions/:id/archive`           | POST      | Archive session                 |
+| `/sessions/:id/unarchive`         | POST      | Unarchive session               |
 
 ### Create PR Payload
 
@@ -81,6 +82,13 @@ The control plane provides:
 
 When `headBranch` is omitted, control-plane resolves it from session state and finally falls back to
 the generated `open-inspect/<session>` branch.
+
+### Recording Artifact Flow
+
+- Sandbox uploads recording bytes through `POST /sessions/:id/artifacts/upload` (sandbox auth only).
+- Control plane stores bytes in `SESSION_ARTIFACTS_BUCKET` with 7-day expiry metadata.
+- Web clients stream recordings through `GET /sessions/:id/artifacts/content` via authenticated web
+  API proxy routes scoped to session participants.
 
 ### Repositories
 
@@ -108,26 +116,26 @@ the generated `open-inspect/<session>` branch.
 
 ### Server → Client Messages
 
-| Type               | Description                   |
-| ------------------ | ----------------------------- |
-| `pong`             | Health check response         |
-| `subscribed`       | Confirm subscription          |
-| `prompt_queued`    | Confirm prompt queued         |
-| `sandbox_event`    | Event from sandbox            |
-| `presence_sync`    | Full presence state           |
-| `presence_update`  | Presence change               |
-| `presence_leave`   | Participant disconnected      |
-| `sandbox_spawning` | Sandbox is being created      |
-| `sandbox_warming`  | Sandbox warming               |
-| `sandbox_status`   | Sandbox status update         |
-| `sandbox_ready`    | Sandbox ready                 |
-| `sandbox_error`    | Sandbox error occurred        |
-| `sandbox_warning`  | Sandbox warning message       |
-| `sandbox_restored` | Restored from snapshot        |
-| `artifact_created` | New artifact (PR, screenshot) |
-| `snapshot_saved`   | Filesystem snapshot saved     |
-| `session_status`   | Session status change         |
-| `error`            | Error occurred                |
+| Type               | Description                              |
+| ------------------ | ---------------------------------------- |
+| `pong`             | Health check response                    |
+| `subscribed`       | Confirm subscription                     |
+| `prompt_queued`    | Confirm prompt queued                    |
+| `sandbox_event`    | Event from sandbox                       |
+| `presence_sync`    | Full presence state                      |
+| `presence_update`  | Presence change                          |
+| `presence_leave`   | Participant disconnected                 |
+| `sandbox_spawning` | Sandbox is being created                 |
+| `sandbox_warming`  | Sandbox warming                          |
+| `sandbox_status`   | Sandbox status update                    |
+| `sandbox_ready`    | Sandbox ready                            |
+| `sandbox_error`    | Sandbox error occurred                   |
+| `sandbox_warning`  | Sandbox warning message                  |
+| `sandbox_restored` | Restored from snapshot                   |
+| `artifact_created` | New artifact (PR, screenshot, recording) |
+| `snapshot_saved`   | Filesystem snapshot saved                |
+| `session_status`   | Session status change                    |
+| `error`            | Error occurred                           |
 
 ## Development
 
@@ -165,7 +173,7 @@ Each session gets its own SQLite database with:
 - `participants`: Users with encrypted GitHub tokens
 - `messages`: Prompt queue and history
 - `events`: Agent events (tool calls, tokens)
-- `artifacts`: PRs, screenshots, previews
+- `artifacts`: PRs, screenshots, previews, recordings
 - `sandbox`: Modal sandbox state
 - `ws_client_mapping`: WebSocket ID to participant mapping (for hibernation recovery)
 

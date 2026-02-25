@@ -111,6 +111,7 @@ export interface PromptCommand {
   content: string;
   model?: string; // LLM model for per-message override
   reasoningEffort?: string; // Reasoning effort level
+  proofRecordingRequested?: boolean;
   providerMode?: "cursor" | "provider";
   cursorSessionId?: string | null;
   author: {

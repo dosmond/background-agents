@@ -64,6 +64,11 @@ resource "cloudflare_d1_database" "main" {
   }
 }
 
+resource "cloudflare_r2_bucket" "session_artifacts" {
+  account_id = var.cloudflare_account_id
+  name       = "open-inspect-session-artifacts-${local.name_suffix}"
+}
+
 resource "null_resource" "d1_migrations" {
   depends_on = [cloudflare_d1_database.main]
 
@@ -130,6 +135,10 @@ module "control_plane_worker" {
     {
       binding_name = "CONTEXT_DOCUMENTS_BUCKET"
       bucket_name  = "open-inspect-context-search"
+    },
+    {
+      binding_name = "SESSION_ARTIFACTS_BUCKET"
+      bucket_name  = cloudflare_r2_bucket.session_artifacts.name
     }
   ]
 

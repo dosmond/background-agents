@@ -90,7 +90,10 @@ const PUBLIC_ROUTES: RegExp[] = [/^\/health$/];
 const SANDBOX_AUTH_ROUTES: RegExp[] = [
   /^\/sessions\/[^/]+\/pr$/, // PR creation from sandbox
   /^\/sessions\/[^/]+\/openai-token-refresh$/, // OpenAI token refresh from sandbox
+  /^\/sessions\/[^/]+\/artifacts\/upload$/, // Artifact uploads from sandbox
 ];
+const MAX_RECORDING_UPLOAD_BYTES = 100 * 1024 * 1024; // 100 MB
+const MAX_ARTIFACT_METADATA_HEADER_BYTES = 4096; // 4 KB
 
 type CachedScmProvider =
   | {
@@ -343,6 +346,16 @@ const routes: Route[] = [
     method: "GET",
     pattern: parsePattern("/sessions/:id/artifacts"),
     handler: handleSessionArtifacts,
+  },
+  {
+    method: "POST",
+    pattern: parsePattern("/sessions/:id/artifacts/upload"),
+    handler: handleSessionArtifactUpload,
+  },
+  {
+    method: "GET",
+    pattern: parsePattern("/sessions/:id/artifacts/content"),
+    handler: handleSessionArtifactContent,
   },
   {
     method: "GET",
@@ -870,6 +883,79 @@ async function handleSessionArtifacts(
   if (!stub) return error("Session ID required");
 
   return stub.fetch(internalRequest("http://internal/internal/artifacts", undefined, ctx));
+}
+
+async function handleSessionArtifactUpload(
+  request: Request,
+  env: Env,
+  match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  const stub = getSessionStub(env, match);
+  if (!stub) return error("Session ID required");
+
+  const url = new URL(request.url);
+  const contentType = request.headers.get("Content-Type") ?? "application/octet-stream";
+  const artifactType = request.headers.get("X-Artifact-Type") ?? "recording";
+  const artifactMetadata = request.headers.get("X-Artifact-Metadata") ?? "{}";
+  const contentLengthHeader = request.headers.get("Content-Length");
+  if (!contentLengthHeader) {
+    return error("Content-Length header is required", 411);
+  }
+  const contentLength = Number(contentLengthHeader);
+  if (!Number.isFinite(contentLength) || contentLength <= 0) {
+    return error("Invalid Content-Length header", 400);
+  }
+  if (contentLength > MAX_RECORDING_UPLOAD_BYTES) {
+    return error("Upload exceeds maximum recording size", 413);
+  }
+  if (artifactMetadata.length > MAX_ARTIFACT_METADATA_HEADER_BYTES) {
+    return error("Artifact metadata header is too large", 400);
+  }
+  if (!request.body) {
+    return error("Upload body is empty", 400);
+  }
+
+  return stub.fetch(
+    internalRequest(
+      `http://internal/internal/artifacts/upload${url.search}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": contentType,
+          "Content-Length": contentLengthHeader,
+          "X-Artifact-Type": artifactType,
+          "X-Artifact-Metadata": artifactMetadata,
+        },
+        body: request.body,
+      },
+      ctx
+    )
+  );
+}
+
+async function handleSessionArtifactContent(
+  request: Request,
+  env: Env,
+  match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  const stub = getSessionStub(env, match);
+  if (!stub) return error("Session ID required");
+
+  const url = new URL(request.url);
+  const range = request.headers.get("Range");
+
+  return stub.fetch(
+    internalRequest(
+      `http://internal/internal/artifacts/content${url.search}`,
+      {
+        method: "GET",
+        headers: range ? { Range: range } : undefined,
+      },
+      ctx
+    )
+  );
 }
 
 async function handleSessionGitChanges(

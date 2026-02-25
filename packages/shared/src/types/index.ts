@@ -15,7 +15,7 @@ export type SandboxStatus =
 export type GitSyncStatus = "pending" | "in_progress" | "completed" | "failed";
 export type MessageStatus = "pending" | "processing" | "completed" | "failed";
 export type MessageSource = "web" | "slack" | "extension" | "github";
-export type ArtifactType = "pr" | "screenshot" | "preview" | "branch";
+export type ArtifactType = "pr" | "screenshot" | "preview" | "branch" | "recording";
 export type EventType = "tool_call" | "tool_result" | "token" | "error" | "git_sync";
 
 // User info for commit attribution

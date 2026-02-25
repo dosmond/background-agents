@@ -1,7 +1,7 @@
 import { generateId } from "../auth/crypto";
 import type { Logger } from "../logger";
 import type { GitPushSpec } from "../source-control";
-import type { SandboxEvent, ServerMessage } from "../types";
+import type { ArtifactType, SandboxEvent, ServerMessage } from "../types";
 import { shouldPersistToolCallEvent } from "./event-persistence";
 import type { SessionRepository } from "./repository";
 import type { CallbackNotificationService } from "./callback-notification-service";
@@ -13,6 +13,7 @@ import {
 } from "./routing-policy";
 
 type PushResolver = { resolve: () => void; reject: (err: Error) => void };
+const VALID_ARTIFACT_TYPES: ArtifactType[] = ["pr", "screenshot", "preview", "branch", "recording"];
 
 interface SessionSandboxEventProcessorDeps {
   ctx: DurableObjectState;
@@ -171,6 +172,47 @@ export class SessionSandboxEventProcessor {
       this.deps.updateLastActivity(now);
       await this.deps.scheduleInactivityCheck();
       await this.deps.processMessageQueue();
+      return;
+    }
+
+    if (event.type === "artifact") {
+      if (!VALID_ARTIFACT_TYPES.includes(event.artifactType as ArtifactType)) {
+        this.deps.log.warn("Ignoring unsupported artifact type", {
+          artifact_type: event.artifactType,
+        });
+        this.deps.broadcast({ type: "sandbox_event", event });
+        return;
+      }
+
+      const artifactId = generateId();
+      const parsedMetadata = event.metadata ?? {};
+      const metadata = JSON.stringify(parsedMetadata);
+      const artifactUrl =
+        typeof event.url === "string" && event.url.trim().length > 0 ? event.url.trim() : null;
+      const prNumber =
+        event.artifactType === "pr" && typeof parsedMetadata.number === "number"
+          ? parsedMetadata.number
+          : undefined;
+
+      this.deps.repository.createArtifact({
+        id: artifactId,
+        type: event.artifactType as ArtifactType,
+        url: artifactUrl,
+        metadata,
+        createdAt: now,
+      });
+
+      this.deps.broadcast({
+        type: "artifact_created",
+        artifact: {
+          id: artifactId,
+          type: event.artifactType,
+          url: artifactUrl,
+          metadata: parsedMetadata,
+          prNumber,
+        },
+      });
+      this.deps.broadcast({ type: "sandbox_event", event });
       return;
     }
 

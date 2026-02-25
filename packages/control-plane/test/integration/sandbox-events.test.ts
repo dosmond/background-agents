@@ -249,4 +249,34 @@ describe("POST /internal/sandbox-event", () => {
     expect(events[0].messageId).toBe("msg-order");
     expect(events[0].data.content).toBe("token-2");
   });
+
+  it("stores artifact events as artifacts", async () => {
+    const { stub } = await initSession();
+
+    const res = await stub.fetch("http://internal/internal/sandbox-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "artifact",
+        artifactType: "recording",
+        url: "https://example.com/proof.webm",
+        metadata: { durationMs: 2000, mimeType: "video/webm" },
+        sandboxId: "sb-1",
+        timestamp: Date.now() / 1000,
+      }),
+    });
+
+    expect(res.status).toBe(200);
+
+    const artifacts = await queryDO<{ type: string; url: string; metadata: string }>(
+      stub,
+      "SELECT type, url, metadata FROM artifacts WHERE type = 'recording'"
+    );
+    expect(artifacts).toHaveLength(1);
+    expect(artifacts[0].url).toBe("https://example.com/proof.webm");
+    expect(JSON.parse(artifacts[0].metadata)).toMatchObject({
+      durationMs: 2000,
+      mimeType: "video/webm",
+    });
+  });
 });

@@ -201,6 +201,7 @@ describe("SessionMessageQueue", () => {
       expect.objectContaining({
         type: "prompt",
         messageId: "msg-42",
+        proofRecordingRequested: false,
         providerMode: "provider",
         cursorSessionId: null,
       })
@@ -229,5 +230,28 @@ describe("SessionMessageQueue", () => {
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
     expect(h.wsManager.send).toHaveBeenCalledWith(sandboxWs, { type: "stop" });
     expect(h.waitUntil).toHaveBeenCalledTimes(1);
+  });
+
+  it("sets proofRecordingRequested when prompt asks for recording evidence", async () => {
+    const h = buildQueue();
+    const sandboxWs = { readyState: WebSocket.OPEN } as WebSocket;
+    h.repository.getNextPendingMessage.mockReturnValue(
+      createMessage({
+        id: "msg-proof",
+        content: "Please record a video as proof that you tested this flow.",
+      })
+    );
+    h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
+
+    await h.queue.processMessageQueue();
+
+    expect(h.wsManager.send).toHaveBeenCalledWith(
+      sandboxWs,
+      expect.objectContaining({
+        type: "prompt",
+        messageId: "msg-proof",
+        proofRecordingRequested: true,
+      })
+    );
   });
 });
