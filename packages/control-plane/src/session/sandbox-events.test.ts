@@ -31,6 +31,7 @@ function createProcessor() {
 
   const broadcast = vi.fn((_message: ServerMessage) => {});
   const triggerSnapshot = vi.fn(async (_reason: string) => {});
+  const reconcileSessionStatusAfterExecution = vi.fn(async (_success: boolean) => {});
   const scheduleInactivityCheck = vi.fn(async () => {});
   const processMessageQueue = vi.fn(async () => {});
   const updateLastActivity = vi.fn();
@@ -55,6 +56,7 @@ function createProcessor() {
     broadcast,
     getIsProcessing,
     triggerSnapshot,
+    reconcileSessionStatusAfterExecution,
     updateLastActivity,
     scheduleInactivityCheck,
     processMessageQueue,
@@ -70,11 +72,13 @@ function createProcessor() {
     callbackService,
     broadcast,
     triggerSnapshot,
+    reconcileSessionStatusAfterExecution,
     scheduleInactivityCheck,
     processMessageQueue,
     getCursorFallbackEnabled,
     getCursorFallbackCooldownMs,
     updateRoutingState,
+    updateLastActivity,
     waitUntil,
   };
 }
@@ -138,6 +142,7 @@ describe("SessionSandboxEventProcessor", () => {
     );
     expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
+    expect(h.reconcileSessionStatusAfterExecution).toHaveBeenCalledWith(true);
     expect(h.triggerSnapshot).toHaveBeenCalledWith("execution_complete");
     expect(h.scheduleInactivityCheck).toHaveBeenCalledTimes(1);
     expect(h.processMessageQueue).toHaveBeenCalledTimes(1);
@@ -160,6 +165,7 @@ describe("SessionSandboxEventProcessor", () => {
     await h.processor.processSandboxEvent({
       type: "push_complete",
       branchName: "feature/test",
+      timestamp: 1000,
     });
 
     await expect(pushPromise).resolves.toEqual({ success: true });
@@ -261,5 +267,204 @@ describe("SessionSandboxEventProcessor", () => {
         url: null,
       })
     );
+  });
+
+  describe("activity tracking for intermediate events", () => {
+    it("resets activity timer on tool_call", async () => {
+      const h = createProcessor();
+      await h.processor.processSandboxEvent({
+        type: "tool_call",
+        tool: "bash",
+        args: { command: "ls" },
+        callId: "call-1",
+        status: "running",
+        messageId: "msg-1",
+        sandboxId: "sb-1",
+        timestamp: 1000,
+      });
+
+      expect(h.updateLastActivity).toHaveBeenCalledWith(expect.any(Number));
+    });
+
+    it("resets activity timer on step_start", async () => {
+      const h = createProcessor();
+      await h.processor.processSandboxEvent({
+        type: "step_start",
+        messageId: "msg-1",
+        sandboxId: "sb-1",
+        timestamp: 1000,
+      });
+
+      expect(h.updateLastActivity).toHaveBeenCalledWith(expect.any(Number));
+    });
+
+    it("resets activity timer on step_finish", async () => {
+      const h = createProcessor();
+      await h.processor.processSandboxEvent({
+        type: "step_finish",
+        messageId: "msg-1",
+        sandboxId: "sb-1",
+        timestamp: 1000,
+      });
+
+      expect(h.updateLastActivity).toHaveBeenCalledWith(expect.any(Number));
+    });
+
+    it("does not reset activity timer on heartbeat", async () => {
+      const h = createProcessor();
+      await h.processor.processSandboxEvent({
+        type: "heartbeat",
+        sandboxId: "sb-1",
+        status: "ready",
+        timestamp: 1000,
+      });
+
+      expect(h.updateLastActivity).not.toHaveBeenCalled();
+    });
+
+    it("does not reset activity timer on token", async () => {
+      const h = createProcessor();
+      await h.processor.processSandboxEvent({
+        type: "token",
+        content: "hello",
+        messageId: "msg-1",
+        sandboxId: "sb-1",
+        timestamp: 1000,
+      });
+
+      expect(h.updateLastActivity).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("ACK mechanism", () => {
+    it("sends ACK after execution_complete when ackId is present", async () => {
+      const h = createProcessor();
+      const sandboxWs = {} as WebSocket;
+      h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
+      h.repository.getProcessingMessage.mockReturnValue({ id: "msg-1" });
+      h.repository.getMessageTimestamps.mockReturnValue({ created_at: 1000, started_at: 1100 });
+
+      const event = {
+        type: "execution_complete",
+        messageId: "msg-1",
+        success: true,
+        sandboxId: "sb-1",
+        timestamp: 2000,
+        ackId: "execution_complete:msg-1",
+      } as unknown as SandboxEvent;
+
+      await h.processor.processSandboxEvent(event);
+
+      expect(h.wsManager.send).toHaveBeenCalledWith(sandboxWs, {
+        type: "ack",
+        ackId: "execution_complete:msg-1",
+      });
+    });
+
+    it("sends ACK for push_complete when ackId is present", async () => {
+      const h = createProcessor();
+      const sandboxWs = {} as WebSocket;
+      h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
+
+      const event = {
+        type: "push_complete",
+        branchName: "feature/test",
+        timestamp: 2000,
+        ackId: "push_complete:msg-2",
+      } as unknown as SandboxEvent;
+
+      await h.processor.processSandboxEvent(event);
+
+      expect(h.wsManager.send).toHaveBeenCalledWith(sandboxWs, {
+        type: "ack",
+        ackId: "push_complete:msg-2",
+      });
+    });
+
+    it("sends ACK for error events when ackId is present", async () => {
+      const h = createProcessor();
+      const sandboxWs = {} as WebSocket;
+      h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
+
+      const event = {
+        type: "error",
+        error: "something failed",
+        messageId: "msg-3",
+        sandboxId: "sb-1",
+        timestamp: 3000,
+        ackId: "error:msg-3",
+      } as unknown as SandboxEvent;
+
+      await h.processor.processSandboxEvent(event);
+
+      expect(h.wsManager.send).toHaveBeenCalledWith(sandboxWs, {
+        type: "ack",
+        ackId: "error:msg-3",
+      });
+    });
+
+    it("does not send ACK when ackId is absent (backward compatibility)", async () => {
+      const h = createProcessor();
+      const sandboxWs = {} as WebSocket;
+      h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
+      h.repository.getProcessingMessage.mockReturnValue({ id: "msg-1" });
+      h.repository.getMessageTimestamps.mockReturnValue({ created_at: 1000, started_at: 1100 });
+
+      const event: SandboxEvent = {
+        type: "execution_complete",
+        messageId: "msg-1",
+        success: true,
+        sandboxId: "sb-1",
+        timestamp: 2000,
+      };
+
+      await h.processor.processSandboxEvent(event);
+
+      expect(h.wsManager.send).not.toHaveBeenCalled();
+    });
+
+    it("sends ACK on already_stopped path for execution_complete", async () => {
+      const h = createProcessor();
+      const sandboxWs = {} as WebSocket;
+      h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
+      // No processing message — triggers the "already_stopped" branch
+      h.repository.getProcessingMessage.mockReturnValue(null);
+
+      const event = {
+        type: "execution_complete",
+        messageId: "msg-1",
+        success: true,
+        sandboxId: "sb-1",
+        timestamp: 2000,
+        ackId: "execution_complete:msg-1",
+      } as unknown as SandboxEvent;
+
+      await h.processor.processSandboxEvent(event);
+
+      expect(h.wsManager.send).toHaveBeenCalledWith(sandboxWs, {
+        type: "ack",
+        ackId: "execution_complete:msg-1",
+      });
+    });
+
+    it("does not send ACK for non-critical events even with ackId", async () => {
+      const h = createProcessor();
+      const sandboxWs = {} as WebSocket;
+      h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
+
+      const event = {
+        type: "token",
+        content: "hello",
+        messageId: "msg-1",
+        sandboxId: "sb-1",
+        timestamp: 1000,
+        ackId: "token:msg-1",
+      } as unknown as SandboxEvent;
+
+      await h.processor.processSandboxEvent(event);
+
+      // Token events return early before ACK logic
+      expect(h.wsManager.send).not.toHaveBeenCalled();
+    });
   });
 });

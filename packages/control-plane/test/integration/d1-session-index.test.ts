@@ -17,6 +17,7 @@ describe("D1 SessionIndexStore", () => {
       repoName: "web-app",
       model: "anthropic/claude-haiku-4-5",
       reasoningEffort: "max",
+      baseBranch: null,
       status: "created",
       createdAt: now,
       updatedAt: now,
@@ -43,6 +44,7 @@ describe("D1 SessionIndexStore", () => {
       repoName: "api",
       model: "anthropic/claude-haiku-4-5",
       reasoningEffort: null,
+      baseBranch: null,
       status: "active",
       createdAt: now,
       updatedAt: now,
@@ -55,6 +57,7 @@ describe("D1 SessionIndexStore", () => {
       repoName: "api",
       model: "anthropic/claude-haiku-4-5",
       reasoningEffort: null,
+      baseBranch: null,
       status: "completed",
       createdAt: now - 1000,
       updatedAt: now - 1000,
@@ -79,6 +82,7 @@ describe("D1 SessionIndexStore", () => {
       repoName: "api",
       model: "anthropic/claude-sonnet-4-5",
       reasoningEffort: "high",
+      baseBranch: null,
       status: "created",
       createdAt: now,
       updatedAt: now,
@@ -103,6 +107,7 @@ describe("D1 SessionIndexStore", () => {
       repoName: "api",
       model: "anthropic/claude-haiku-4-5",
       reasoningEffort: null,
+      baseBranch: null,
       status: "created",
       createdAt: now,
       updatedAt: now,
@@ -123,6 +128,7 @@ describe("D1 SessionIndexStore", () => {
       repoName: "web-app",
       model: "anthropic/claude-haiku-4-5",
       reasoningEffort: null,
+      baseBranch: null,
       status: "created",
       createdAt: now,
       updatedAt: now,
@@ -133,5 +139,172 @@ describe("D1 SessionIndexStore", () => {
 
     const session = await store.get("session-to-delete");
     expect(session).toBeNull();
+  });
+
+  it("rejects stale status updates when a newer status write exists", async () => {
+    const store = new SessionIndexStore(env.DB);
+
+    await store.create({
+      id: "status-ordering-1",
+      title: "Ordering",
+      repoOwner: "acme",
+      repoName: "worker",
+      model: "anthropic/claude-haiku-4-5",
+      reasoningEffort: null,
+      baseBranch: null,
+      status: "active",
+      createdAt: 1000,
+      updatedAt: 1000,
+    });
+
+    const latestApplied = await store.updateStatus("status-ordering-1", "completed", 3000);
+    expect(latestApplied).toBe(true);
+
+    const staleApplied = await store.updateStatus("status-ordering-1", "failed", 2000);
+    expect(staleApplied).toBe(false);
+
+    const row = await store.get("status-ordering-1");
+    expect(row?.status).toBe("completed");
+    expect(row?.updatedAt).toBe(3000);
+  });
+
+  describe("parent/child queries", () => {
+    const store = new SessionIndexStore(env.DB);
+    const parentId = "parent-session-1";
+    const childId1 = "child-session-1";
+    const childId2 = "child-session-2";
+
+    beforeEach(async () => {
+      await cleanD1Tables();
+
+      const now = Date.now();
+
+      // Seed parent
+      await store.create({
+        id: parentId,
+        title: "Parent",
+        repoOwner: "owner",
+        repoName: "repo",
+        model: "anthropic/claude-sonnet-4-6",
+        reasoningEffort: null,
+        baseBranch: null,
+        status: "active",
+        parentSessionId: null,
+        spawnSource: "user",
+        spawnDepth: 0,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      // Seed child 1 (active)
+      await store.create({
+        id: childId1,
+        title: "Child 1",
+        repoOwner: "owner",
+        repoName: "repo",
+        model: "anthropic/claude-sonnet-4-6",
+        reasoningEffort: null,
+        baseBranch: null,
+        status: "created",
+        parentSessionId: parentId,
+        spawnSource: "agent",
+        spawnDepth: 1,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      // Seed child 2 (completed)
+      await store.create({
+        id: childId2,
+        title: "Child 2",
+        repoOwner: "owner",
+        repoName: "repo",
+        model: "anthropic/claude-sonnet-4-6",
+        reasoningEffort: null,
+        baseBranch: null,
+        status: "completed",
+        parentSessionId: parentId,
+        spawnSource: "agent",
+        spawnDepth: 1,
+        createdAt: now + 1,
+        updatedAt: now + 1,
+      });
+    });
+
+    it("listByParent returns children newest-first", async () => {
+      const children = await store.listByParent(parentId);
+      expect(children).toHaveLength(2);
+      expect(children[0].id).toBe(childId2); // newer
+      expect(children[1].id).toBe(childId1); // older
+    });
+
+    it("listByParent returns empty array when no children exist", async () => {
+      const children = await store.listByParent("nonexistent-parent");
+      expect(children).toEqual([]);
+    });
+
+    it("countActiveChildren excludes completed/failed/archived/cancelled", async () => {
+      await store.create({
+        id: "child-session-failed",
+        title: "Child failed",
+        repoOwner: "owner",
+        repoName: "repo",
+        model: "anthropic/claude-sonnet-4-6",
+        reasoningEffort: null,
+        baseBranch: null,
+        status: "failed",
+        parentSessionId: parentId,
+        spawnSource: "agent",
+        spawnDepth: 1,
+        createdAt: Date.now() + 2,
+        updatedAt: Date.now() + 2,
+      });
+
+      const count = await store.countActiveChildren(parentId);
+      expect(count).toBe(1); // child1 is "created" (active), child2 is "completed" (excluded)
+    });
+
+    it("countTotalChildren counts all children regardless of status", async () => {
+      const count = await store.countTotalChildren(parentId);
+      expect(count).toBe(2);
+    });
+
+    it("isChildOf returns true for valid parent-child pair", async () => {
+      const result = await store.isChildOf(childId1, parentId);
+      expect(result).toBe(true);
+    });
+
+    it("isChildOf returns false for unrelated sessions", async () => {
+      const result = await store.isChildOf(childId1, "unrelated-session");
+      expect(result).toBe(false);
+    });
+
+    it("isChildOf returns false for reversed parent-child", async () => {
+      const result = await store.isChildOf(parentId, childId1);
+      expect(result).toBe(false);
+    });
+
+    it("getSpawnDepth returns stored depth", async () => {
+      const depth = await store.getSpawnDepth(childId1);
+      expect(depth).toBe(1);
+    });
+
+    it("getSpawnDepth returns 0 for top-level session", async () => {
+      const depth = await store.getSpawnDepth(parentId);
+      expect(depth).toBe(0);
+    });
+
+    it("getSpawnDepth returns 0 for unknown session", async () => {
+      const depth = await store.getSpawnDepth("nonexistent");
+      expect(depth).toBe(0);
+    });
+
+    it("create stores parent fields and get retrieves them", async () => {
+      const child = await store.get(childId1);
+      expect(child).not.toBeNull();
+      expect(child!.parentSessionId).toBe(parentId);
+      expect(child!.spawnSource).toBe("agent");
+      expect(child!.spawnDepth).toBe(1);
+    });
   });
 });

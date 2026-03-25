@@ -7,47 +7,19 @@ import {
   MetadataSection,
   TasksSection,
   FilesChangedSection,
+  CodeServerSection,
 } from "./sidebar";
+import { ChildSessionsSection } from "./sidebar/child-sessions-section";
+import { extractChangedFiles } from "@/lib/files";
 import { extractLatestTasks } from "@/lib/tasks";
-import type { Artifact, FileChange } from "@/types/session";
-
-interface SessionState {
-  id: string;
-  title: string | null;
-  repoOwner: string;
-  repoName: string;
-  branchName: string | null;
-  status: string;
-  sandboxStatus: string;
-  messageCount: number;
-  createdAt: number;
-  model?: string;
-  reasoningEffort?: string;
-  providerMode?: "cursor" | "provider";
-  providerFallbackReason?: "unsupported_model" | "cursor_429" | "cursor_quota_exhausted" | null;
-}
-
-interface Participant {
-  userId: string;
-  name: string;
-  avatar?: string;
-  status: "active" | "idle" | "away";
-  lastSeen: number;
-}
-
-interface SandboxEvent {
-  type: string;
-  tool?: string;
-  args?: Record<string, unknown>;
-  timestamp: number;
-}
+import type { Artifact, SandboxEvent } from "@/types/session";
+import type { ParticipantPresence, SessionState } from "@open-inspect/shared";
 
 interface SessionRightSidebarProps {
   sessionState: SessionState | null;
-  participants: Participant[];
+  participants: ParticipantPresence[];
   events: SandboxEvent[];
   artifacts: Artifact[];
-  filesChanged?: FileChange[];
 }
 
 export type SessionRightSidebarContentProps = SessionRightSidebarProps;
@@ -57,9 +29,9 @@ export function SessionRightSidebarContent({
   participants,
   events,
   artifacts,
-  filesChanged = [],
 }: SessionRightSidebarContentProps) {
   const tasks = useMemo(() => extractLatestTasks(events), [events]);
+  const filesChanged = useMemo(() => extractChangedFiles(events), [events]);
 
   if (!sessionState) {
     return (
@@ -75,41 +47,50 @@ export function SessionRightSidebarContent({
 
   return (
     <>
-      {/* Participants */}
-      <div className="px-4 py-4 border-b border-border-muted">
+      <div className="border-b border-border-muted px-4 py-4">
         <ParticipantsSection participants={participants} />
       </div>
 
-      {/* Metadata */}
-      <div className="px-4 py-4 border-b border-border-muted">
+      <div className="border-b border-border-muted px-4 py-4">
         <MetadataSection
           createdAt={sessionState.createdAt}
           model={sessionState.model}
           reasoningEffort={sessionState.reasoningEffort}
           providerMode={sessionState.providerMode}
           providerFallbackReason={sessionState.providerFallbackReason}
+          baseBranch={sessionState.baseBranch}
           branchName={sessionState.branchName || undefined}
           repoOwner={sessionState.repoOwner}
           repoName={sessionState.repoName}
           artifacts={artifacts}
+          parentSessionId={sessionState.parentSessionId}
         />
       </div>
 
-      {/* Tasks */}
+      {sessionState.codeServerUrl && (
+        <div className="border-b border-border-muted px-4 py-4">
+          <CodeServerSection
+            url={sessionState.codeServerUrl}
+            password={sessionState.codeServerPassword ?? null}
+            sandboxStatus={sessionState.sandboxStatus}
+          />
+        </div>
+      )}
+
       {tasks.length > 0 && (
         <CollapsibleSection title="Tasks" defaultOpen={true}>
           <TasksSection tasks={tasks} />
         </CollapsibleSection>
       )}
 
-      {/* Files Changed */}
+      <ChildSessionsSection sessionId={sessionState.id} />
+
       {filesChanged.length > 0 && (
         <CollapsibleSection title="Files changed" defaultOpen={true}>
           <FilesChangedSection files={filesChanged} />
         </CollapsibleSection>
       )}
 
-      {/* Artifacts info when no specific sections are populated */}
       {tasks.length === 0 && filesChanged.length === 0 && artifacts.length === 0 && (
         <div className="px-4 py-4">
           <p className="text-sm text-muted-foreground">
@@ -126,16 +107,14 @@ export function SessionRightSidebar({
   participants,
   events,
   artifacts,
-  filesChanged = [],
 }: SessionRightSidebarProps) {
   return (
-    <aside className="w-80 border-l border-border-muted overflow-y-auto hidden lg:block">
+    <aside className="hidden w-80 overflow-y-auto border-l border-border-muted lg:block">
       <SessionRightSidebarContent
         sessionState={sessionState}
         participants={participants}
         events={events}
         artifacts={artifacts}
-        filesChanged={filesChanged}
       />
     </aside>
   );

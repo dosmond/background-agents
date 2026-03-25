@@ -97,6 +97,7 @@ describe("SessionRepository", () => {
         "owner",
         "repo",
         null,
+        "main",
         "claude-sonnet-4",
         null,
         null,
@@ -104,6 +105,10 @@ describe("SessionRepository", () => {
         null,
         null,
         "created",
+        null,
+        "user",
+        0,
+        0,
         1000,
         2000,
       ]);

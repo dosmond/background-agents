@@ -10,17 +10,21 @@ This module handles:
 Updated: 2026-01-15 to fix Sandbox.create API
 """
 
+import asyncio
 import json
 import os
+import secrets
 import time
 from dataclasses import dataclass
 
 import modal
 
+from sandbox_runtime.constants import CODE_SERVER_PORT
+from sandbox_runtime.log_config import get_logger
+from sandbox_runtime.types import SandboxStatus, SessionConfig
+
 from ..app import app, llm_secrets
 from ..images.base import base_image
-from .log_config import get_logger
-from .types import SandboxStatus, SessionConfig
 
 log = get_logger("manager")
 
@@ -42,6 +46,9 @@ class SandboxConfig:
     clone_token: str | None = None  # VCS clone token for git operations
     user_env_vars: dict[str, str] | None = None  # User-provided env vars (repo secrets)
     mcp_config: dict | None = None  # Repository-scoped MCP config for OpenCode
+    repo_image_id: str | None = None  # Pre-built repo image ID from provider
+    repo_image_sha: str | None = None  # Git SHA the repo image was built from
+    code_server_enabled: bool = False  # Whether to start code-server in the sandbox
 
 
 @dataclass
@@ -54,6 +61,8 @@ class SandboxHandle:
     created_at: float
     snapshot_id: str | None = None
     modal_object_id: str | None = None  # Modal's internal sandbox ID for API calls
+    code_server_url: str | None = None
+    code_server_password: str | None = None
 
     def get_logs(self) -> str:
         """Get sandbox logs."""
@@ -81,6 +90,36 @@ class SandboxManager:
     def _get_repo_key(self, repo_owner: str, repo_name: str) -> str:
         """Get unique key for a repository."""
         return f"{repo_owner}/{repo_name}"
+
+    @staticmethod
+    def _generate_code_server_password() -> str:
+        """Generate a random code-server password."""
+        return secrets.token_urlsafe(16)
+
+    @staticmethod
+    async def _resolve_code_server_tunnel(
+        sandbox: modal.Sandbox, sandbox_id: str, retries: int = 3, backoff: float = 1.0
+    ) -> str | None:
+        """Resolve the code-server tunnel URL from Modal, retrying on failure."""
+        for attempt in range(retries):
+            try:
+                loop = asyncio.get_running_loop()
+                tunnels = await loop.run_in_executor(None, sandbox.tunnels)
+                tunnel = tunnels[CODE_SERVER_PORT]
+                log.info("code_server.tunnel", sandbox_id=sandbox_id, url=tunnel.url)
+                return tunnel.url
+            except Exception as e:
+                log.warn(
+                    "code_server.tunnel_error",
+                    sandbox_id=sandbox_id,
+                    attempt=attempt + 1,
+                    retries=retries,
+                    error=type(e).__name__,
+                    exc=e,
+                )
+                if attempt < retries - 1:
+                    await asyncio.sleep(backoff * (attempt + 1))
+        return None
 
     @staticmethod
     def _inject_vcs_env_vars(env_vars: dict[str, str], clone_token: str | None) -> None:
@@ -143,36 +182,52 @@ class SandboxManager:
 
         self._inject_vcs_env_vars(env_vars, config.clone_token)
 
+        code_server_password: str | None = None
+        if config.code_server_enabled:
+            code_server_password = self._generate_code_server_password()
+            env_vars["CODE_SERVER_PASSWORD"] = code_server_password
+
         if config.session_config:
             env_vars["SESSION_CONFIG"] = config.session_config.model_dump_json()
         if config.mcp_config:
             env_vars["MCP_CONFIG_CONTENT"] = json.dumps(config.mcp_config)
 
-        # Determine image to use
+        # Determine image to use (priority: session snapshot > repo image > base image)
         if config.snapshot_id:
-            # Restore from snapshot
             image = modal.Image.from_registry(f"open-inspect-snapshot:{config.snapshot_id}")
+        elif config.repo_image_id:
+            image = modal.Image.from_id(config.repo_image_id)
+            env_vars["FROM_REPO_IMAGE"] = "true"
+            env_vars["REPO_IMAGE_SHA"] = config.repo_image_sha or ""
         else:
-            # Use base image (would be repo-specific in production)
             image = base_image
 
         # Create the sandbox
         # The entrypoint command is passed as positional args
-        sandbox = modal.Sandbox.create(
+        create_kwargs: dict = {
+            "image": image,
+            "app": app,
+            "secrets": [llm_secrets],
+            "timeout": config.timeout_seconds,
+            "workdir": "/workspace",
+            "env": env_vars,
+        }
+        if config.code_server_enabled:
+            create_kwargs["encrypted_ports"] = [CODE_SERVER_PORT]
+
+        sandbox = await modal.Sandbox.create.aio(
             "python",
             "-m",
-            "sandbox.entrypoint",  # Run the supervisor entrypoint
-            image=image,
-            app=app,
-            secrets=[llm_secrets],
-            timeout=config.timeout_seconds,
-            workdir="/workspace",
-            env=env_vars,
-            # Note: volumes parameter is not supported in Sandbox.create
+            "sandbox_runtime.entrypoint",  # Run the supervisor entrypoint
+            **create_kwargs,
         )
 
         # Get Modal's internal object ID for API calls (snapshot, etc.)
         modal_object_id = sandbox.object_id
+        code_server_url: str | None = None
+        if config.code_server_enabled:
+            code_server_url = await self._resolve_code_server_tunnel(sandbox, sandbox_id)
+
         duration_ms = int((time.time() - start_time) * 1000)
         log.info(
             "sandbox.create",
@@ -190,6 +245,81 @@ class SandboxManager:
             status=SandboxStatus.WARMING,
             created_at=time.time(),
             snapshot_id=config.snapshot_id,
+            modal_object_id=modal_object_id,
+            code_server_url=code_server_url,
+            code_server_password=code_server_password,
+        )
+
+    async def create_build_sandbox(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        default_branch: str = "main",
+        clone_token: str = "",
+        user_env_vars: dict[str, str] | None = None,
+    ) -> SandboxHandle:
+        """
+        Create a sandbox specifically for image building.
+
+        Like create_sandbox() but:
+        - Sets IMAGE_BUILD_MODE=true (exits after setup, no OpenCode/bridge)
+        - No CONTROL_PLANE_URL, SANDBOX_AUTH_TOKEN, or LLM secrets
+        - Shorter timeout (30 min vs 2 hours)
+        - Always uses base_image (builds start from the universal base)
+        """
+        BUILD_TIMEOUT_SECONDS = 1800
+
+        start_time = time.time()
+        sandbox_id = f"build-{repo_owner}-{repo_name}-{int(time.time() * 1000)}"
+
+        # Prepare environment variables (user vars first, system vars override)
+        env_vars: dict[str, str] = {}
+
+        if user_env_vars:
+            env_vars.update(user_env_vars)
+
+        env_vars.update(
+            {
+                "PYTHONUNBUFFERED": "1",
+                "SANDBOX_ID": sandbox_id,
+                "REPO_OWNER": repo_owner,
+                "REPO_NAME": repo_name,
+                "IMAGE_BUILD_MODE": "true",
+                "SESSION_CONFIG": json.dumps({"branch": default_branch}),
+            }
+        )
+
+        self._inject_vcs_env_vars(env_vars, clone_token or None)
+
+        sandbox = await modal.Sandbox.create.aio(
+            "python",
+            "-m",
+            "sandbox_runtime.entrypoint",
+            image=base_image,
+            app=app,
+            secrets=[],
+            timeout=BUILD_TIMEOUT_SECONDS,
+            workdir="/workspace",
+            env=env_vars,
+        )
+
+        modal_object_id = sandbox.object_id
+        duration_ms = int((time.time() - start_time) * 1000)
+        log.info(
+            "sandbox.create_build",
+            sandbox_id=sandbox_id,
+            modal_object_id=modal_object_id,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            duration_ms=duration_ms,
+            outcome="success",
+        )
+
+        return SandboxHandle(
+            sandbox_id=sandbox_id,
+            modal_sandbox=sandbox,
+            status=SandboxStatus.WARMING,
+            created_at=time.time(),
             modal_object_id=modal_object_id,
         )
 
@@ -310,6 +440,7 @@ class SandboxManager:
         user_env_vars: dict[str, str] | None = None,
         mcp_config: dict | None = None,
         timeout_seconds: int = DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+        code_server_enabled: bool = False,
     ) -> SandboxHandle:
         """
         Create a new sandbox from a filesystem snapshot Image.
@@ -337,12 +468,14 @@ class SandboxManager:
             provider = session_config.get("provider", "anthropic")
             model = session_config.get("model", "claude-sonnet-4-6")
             session_id = session_config.get("session_id", "")
+            branch = session_config.get("branch")
         else:
             repo_owner = session_config.repo_owner
             repo_name = session_config.repo_name
             provider = session_config.provider
             model = session_config.model
             session_id = session_config.session_id
+            branch = session_config.branch
 
         # Use provided sandbox_id or generate one
         if not sandbox_id:
@@ -373,6 +506,7 @@ class SandboxManager:
                         "repo_name": repo_name,
                         "provider": provider,
                         "model": model,
+                        **({"branch": branch} if branch else {}),
                     }
                 ),
             }
@@ -382,20 +516,34 @@ class SandboxManager:
 
         self._inject_vcs_env_vars(env_vars, clone_token)
 
+        code_server_password: str | None = None
+        if code_server_enabled:
+            code_server_password = self._generate_code_server_password()
+            env_vars["CODE_SERVER_PASSWORD"] = code_server_password
+
         # Create the sandbox from the snapshot image
-        sandbox = modal.Sandbox.create(
+        create_kwargs: dict = {
+            "image": image,  # Use the snapshot image directly
+            "app": app,
+            "secrets": [llm_secrets],
+            "timeout": timeout_seconds,
+            "workdir": "/workspace",
+            "env": env_vars,
+        }
+        if code_server_enabled:
+            create_kwargs["encrypted_ports"] = [CODE_SERVER_PORT]
+
+        sandbox = await modal.Sandbox.create.aio(
             "python",
             "-m",
-            "sandbox.entrypoint",
-            image=image,  # Use the snapshot image directly
-            app=app,
-            secrets=[llm_secrets],
-            timeout=timeout_seconds,
-            workdir="/workspace",
-            env=env_vars,
+            "sandbox_runtime.entrypoint",
+            **create_kwargs,
         )
 
         modal_object_id = sandbox.object_id
+        code_server_url: str | None = None
+        if code_server_enabled:
+            code_server_url = await self._resolve_code_server_tunnel(sandbox, sandbox_id)
 
         duration_ms = int((time.time() - start_time) * 1000)
         log.info(
@@ -416,6 +564,8 @@ class SandboxManager:
             created_at=time.time(),
             snapshot_id=snapshot_image_id,
             modal_object_id=modal_object_id,
+            code_server_url=code_server_url,
+            code_server_password=code_server_password,
         )
 
     async def maintain_warm_pool(

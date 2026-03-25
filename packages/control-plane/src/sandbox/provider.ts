@@ -5,6 +5,8 @@
  * enabling unit testing and future provider support.
  */
 
+import type { CorrelationContext } from "../logger";
+
 /** Default sandbox lifetime in seconds (2 hours). */
 export const DEFAULT_SANDBOX_TIMEOUT_SECONDS = 7200;
 
@@ -47,14 +49,18 @@ export interface CreateSandboxConfig {
   mcpConfig?: Record<string, unknown>;
   /** OpenCode session ID for resumption */
   opencodeSessionId?: string;
-  /** Git user name for commits */
-  gitUserName?: string;
-  /** Git user email for commits */
-  gitUserEmail?: string;
-  /** Trace ID for correlation */
-  traceId?: string;
-  /** Request ID for correlation */
-  requestId?: string;
+  /** Correlation context for downstream tracing */
+  correlation?: CorrelationContext;
+  /** Opaque provider image ID of a pre-built repo image */
+  repoImageId?: string | null;
+  /** Git SHA the repo image was built from */
+  repoImageSha?: string | null;
+  /** Sandbox lifetime in seconds. Defaults to DEFAULT_SANDBOX_TIMEOUT_SECONDS on Modal. */
+  timeoutSeconds?: number;
+  /** Git branch to work on (defaults to repo's default branch) */
+  branch?: string;
+  /** Whether to enable code-server (browser-based editor) in the sandbox */
+  codeServerEnabled?: boolean;
 }
 
 /**
@@ -69,6 +75,10 @@ export interface CreateSandboxResult {
   status: string;
   /** Creation timestamp */
   createdAt: number;
+  /** Code-server tunnel URL (if available) */
+  codeServerUrl?: string;
+  /** Code-server password (if available) */
+  codeServerPassword?: string;
 }
 
 /**
@@ -99,10 +109,12 @@ export interface RestoreConfig {
   mcpConfig?: Record<string, unknown>;
   /** Sandbox lifetime in seconds. Defaults to DEFAULT_SANDBOX_TIMEOUT_SECONDS. */
   timeoutSeconds?: number;
-  /** Trace ID for correlation */
-  traceId?: string;
-  /** Request ID for correlation */
-  requestId?: string;
+  /** Git branch to work on (defaults to repo's default branch) */
+  branch?: string;
+  /** Correlation context for downstream tracing */
+  correlation?: CorrelationContext;
+  /** Whether to enable code-server (browser-based editor) in the sandbox */
+  codeServerEnabled?: boolean;
 }
 
 /**
@@ -117,6 +129,10 @@ export interface RestoreResult {
   providerObjectId?: string;
   /** Error message if failed */
   error?: string;
+  /** Code-server tunnel URL (if available) */
+  codeServerUrl?: string;
+  /** Code-server password (if available) */
+  codeServerPassword?: string;
 }
 
 /**
@@ -129,10 +145,8 @@ export interface SnapshotConfig {
   sessionId: string;
   /** Reason for the snapshot (e.g., "inactivity_timeout", "execution_complete") */
   reason: string;
-  /** Trace ID for correlation */
-  traceId?: string;
-  /** Request ID for correlation */
-  requestId?: string;
+  /** Correlation context for downstream tracing */
+  correlation?: CorrelationContext;
 }
 
 /**
@@ -247,7 +261,7 @@ export class SandboxProviderError extends Error {
  *
  * @example
  * ```typescript
- * const provider: SandboxProvider = new ModalSandboxProvider(client, secret);
+ * const provider: SandboxProvider = new ModalSandboxProvider(client);
  *
  * try {
  *   const result = await provider.createSandbox(config);

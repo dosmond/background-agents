@@ -34,6 +34,7 @@ import {
 import { COMPOSER_COMMANDS, type ComposerCommand } from "@/lib/composer-commands";
 import { replaceActiveSlashToken } from "@/lib/composer-insert";
 import { getSlashTokenContext } from "@/lib/composer-slash-grammar";
+import { SIDEBAR_SESSIONS_KEY } from "@/lib/session-list";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import {
   DEFAULT_MODEL,
@@ -45,8 +46,8 @@ import {
 import { useEnabledModels } from "@/hooks/use-enabled-models";
 import { ReasoningEffortPills } from "@/components/reasoning-effort-pills";
 import { SessionGitDiffPanel } from "@/components/session-git-diff-panel";
-import type { SandboxEvent } from "@/lib/tool-formatters";
 import type { SessionGitChangesResponse } from "@/types/session";
+import type { SandboxEvent } from "@/types/session";
 import {
   SidebarIcon,
   ModelIcon,
@@ -58,15 +59,26 @@ import {
 } from "@/components/ui/icons";
 import { Combobox, type ComboboxGroup } from "@/components/ui/combobox";
 
+type ToolCallEvent = Extract<SandboxEvent, { type: "tool_call" }>;
+import type { SessionItem } from "@/components/session-sidebar";
+
 // Event grouping types
 type EventGroup =
-  | { type: "tool_group"; events: SandboxEvent[]; id: string }
+  | { type: "tool_group"; events: ToolCallEvent[]; id: string }
   | { type: "single"; event: SandboxEvent; id: string };
+
+type FallbackSessionInfo = {
+  repoOwner: string | null;
+  repoName: string | null;
+  title: string | null;
+};
+
+type SessionsResponse = { sessions: SessionItem[] };
 
 // Group consecutive tool calls of the same type
 function groupEvents(events: SandboxEvent[]): EventGroup[] {
   const groups: EventGroup[] = [];
-  let currentToolGroup: SandboxEvent[] = [];
+  let currentToolGroup: ToolCallEvent[] = [];
   let groupIndex = 0;
 
   const flushToolGroup = () => {
@@ -96,7 +108,7 @@ function groupEvents(events: SandboxEvent[]): EventGroup[] {
       groups.push({
         type: "single",
         event,
-        id: `single-${event.type}-${event.messageId || event.timestamp}-${groupIndex++}`,
+        id: `single-${event.type}-${("messageId" in event ? event.messageId : undefined) || event.timestamp}-${groupIndex++}`,
       });
     }
   }
@@ -105,6 +117,45 @@ function groupEvents(events: SandboxEvent[]): EventGroup[] {
   flushToolGroup();
 
   return groups;
+}
+
+function dedupeAndGroupEvents(events: SandboxEvent[]): EventGroup[] {
+  const filteredEvents: Array<SandboxEvent | null> = [];
+  const seenToolCalls = new Map<string, number>();
+  const seenCompletions = new Set<string>();
+  const seenTokens = new Map<string, number>();
+
+  for (const event of events) {
+    if (event.type === "tool_call" && event.callId) {
+      // Deduplicate tool_call events by callId - keep the latest (most complete) one
+      const existingIdx = seenToolCalls.get(event.callId);
+      if (existingIdx !== undefined) {
+        filteredEvents[existingIdx] = event;
+      } else {
+        seenToolCalls.set(event.callId, filteredEvents.length);
+        filteredEvents.push(event);
+      }
+    } else if (event.type === "execution_complete" && event.messageId) {
+      // Skip duplicate execution_complete for the same message
+      if (!seenCompletions.has(event.messageId)) {
+        seenCompletions.add(event.messageId);
+        filteredEvents.push(event);
+      }
+    } else if (event.type === "token" && event.messageId) {
+      // Deduplicate tokens by messageId - keep latest at its chronological position
+      const existingIdx = seenTokens.get(event.messageId);
+      if (existingIdx !== undefined) {
+        filteredEvents[existingIdx] = null;
+      }
+      seenTokens.set(event.messageId, filteredEvents.length);
+      filteredEvents.push(event);
+    } else {
+      // All other events (user_message, git_sync, etc.) - add as-is
+      filteredEvents.push(event);
+    }
+  }
+
+  return groupEvents(filteredEvents.filter((event): event is SandboxEvent => event !== null));
 }
 
 export default function SessionPage() {
@@ -156,11 +207,26 @@ function SessionPageContent() {
     (url: string) =>
       fetch(url, { method: "POST" }).then((r) => {
         if (r.ok) {
-          mutate("/api/sessions");
+          mutate(SIDEBAR_SESSIONS_KEY);
           return true;
         }
 
         console.error("Failed to archive session");
+        return false;
+      }),
+    { throwOnError: false }
+  );
+
+  const { trigger: triggerRename } = useSWRMutation(
+    `/api/sessions/${sessionId}/title`,
+    (url: string, { arg }: { arg: { title: string } }) =>
+      fetch(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: arg.title }),
+      }).then((r) => {
+        if (r.ok) return true;
+        console.error("Failed to update session title");
         return false;
       }),
     { throwOnError: false }
@@ -173,11 +239,49 @@ function SessionPageContent() {
     }
   }, [router, triggerArchive]);
 
+  const renameSession = useCallback(
+    async (title: string) => {
+      const updatedAt = Date.now();
+      const updateSessionsTitle = (data?: SessionsResponse): SessionsResponse => {
+        if (!data?.sessions) return { sessions: [] };
+        return {
+          ...data,
+          sessions: data.sessions.map((session) =>
+            session.id === sessionId ? { ...session, title, updatedAt } : session
+          ),
+        };
+      };
+
+      try {
+        await mutate<SessionsResponse>(
+          "/api/sessions",
+          async (currentData?: SessionsResponse) => {
+            const success = await triggerRename({ title });
+            if (!success) {
+              throw new Error("Failed to update session title");
+            }
+            return updateSessionsTitle(currentData);
+          },
+          {
+            optimisticData: updateSessionsTitle,
+            rollbackOnError: true,
+            populateCache: true,
+            revalidate: true,
+          }
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [sessionId, triggerRename]
+  );
+
   const { trigger: handleUnarchive } = useSWRMutation(
     `/api/sessions/${sessionId}/unarchive`,
     (url: string) =>
       fetch(url, { method: "POST" }).then((r) => {
-        if (r.ok) mutate("/api/sessions");
+        if (r.ok) mutate(SIDEBAR_SESSIONS_KEY);
         else console.error("Failed to unarchive session");
       }),
     { throwOnError: false }
@@ -470,6 +574,7 @@ function SessionPageContent() {
       stopExecution={stopExecution}
       handleArchive={handleArchive}
       handleUnarchive={handleUnarchive}
+      renameSession={renameSession}
       loadingHistory={loadingHistory}
       loadOlderEvents={loadOlderEvents}
       modelOptions={enabledModelOptions}
@@ -516,6 +621,7 @@ function SessionContent({
   stopExecution,
   handleArchive,
   handleUnarchive,
+  renameSession,
   loadingHistory,
   loadOlderEvents,
   modelOptions,
@@ -558,6 +664,7 @@ function SessionContent({
   stopExecution: () => void;
   handleArchive: () => void | Promise<void>;
   handleUnarchive: () => void | Promise<void>;
+  renameSession: (title: string) => Promise<boolean | undefined>;
   loadingHistory: boolean;
   loadOlderEvents: () => void;
   modelOptions: ModelCategory[];
@@ -575,6 +682,13 @@ function SessionContent({
   const { isOpen, toggle } = useSidebarContext();
   const isBelowLg = useMediaQuery("(max-width: 1023px)");
   const isPhone = useMediaQuery("(max-width: 767px)");
+  const resolvedRepoOwner = sessionState?.repoOwner ?? fallbackSessionInfo.repoOwner;
+  const resolvedRepoName = sessionState?.repoName ?? fallbackSessionInfo.repoName;
+  const fallbackRepoLabel =
+    resolvedRepoOwner && resolvedRepoName
+      ? `${resolvedRepoOwner}/${resolvedRepoName}`
+      : "Loading session...";
+
   const [isDetailsOpen, setIsDetailsOpen] = useState(false);
   const [isGitPanelOpen, setIsGitPanelOpen] = useState(false);
   const [gitSplitView, setGitSplitView] = useState(false);
@@ -618,23 +732,26 @@ function SessionContent({
     { throwOnError: false }
   );
 
-  const closeDetails = useCallback(() => {
-    setIsDetailsOpen(false);
+  const resetSheetDragState = useCallback(() => {
     setSheetDragY(0);
     sheetDragYRef.current = 0;
-    detailsButtonRef.current?.focus();
   }, []);
+
+  const closeDetails = useCallback(() => {
+    setIsDetailsOpen(false);
+    resetSheetDragState();
+    detailsButtonRef.current?.focus();
+  }, [resetSheetDragState]);
 
   const toggleDetails = useCallback(() => {
     setIsDetailsOpen((prev) => {
       const next = !prev;
       if (!next) {
-        setSheetDragY(0);
-        sheetDragYRef.current = 0;
+        resetSheetDragState();
       }
       return next;
     });
-  }, []);
+  }, [resetSheetDragState]);
 
   const handleSheetTouchStart = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
     const startY = event.touches[0]?.clientY;
@@ -673,9 +790,8 @@ function SessionContent({
   useEffect(() => {
     if (isBelowLg) return;
     setIsDetailsOpen(false);
-    setSheetDragY(0);
-    sheetDragYRef.current = 0;
-  }, [isBelowLg]);
+    resetSheetDragState();
+  }, [isBelowLg, resetSheetDragState]);
 
   useEffect(() => {
     if (!isDetailsOpen) return;
@@ -751,51 +867,7 @@ function SessionContent({
   }, [events, messagesEndRef]);
 
   // Deduplicate and group events for rendering
-  const groupedEvents = useMemo(() => {
-    const filteredEvents: SandboxEvent[] = [];
-    const seenToolCalls = new Map<string, number>();
-    const seenCompletions = new Set<string>();
-    const seenTokens = new Map<string, number>();
-
-    for (const event of events as SandboxEvent[]) {
-      if (event.type === "tool_call" && event.callId) {
-        // Deduplicate tool_call events by callId - keep the latest (most complete) one
-        const existingIdx = seenToolCalls.get(event.callId);
-        if (existingIdx !== undefined) {
-          filteredEvents[existingIdx] = event;
-        } else {
-          seenToolCalls.set(event.callId, filteredEvents.length);
-          filteredEvents.push(event);
-        }
-      } else if (event.type === "execution_complete" && event.messageId) {
-        // Skip duplicate execution_complete for the same message
-        if (!seenCompletions.has(event.messageId)) {
-          seenCompletions.add(event.messageId);
-          filteredEvents.push(event);
-        }
-      } else if (event.type === "token" && event.messageId) {
-        // Deduplicate tokens by messageId - keep latest at its chronological position
-        const existingIdx = seenTokens.get(event.messageId);
-        if (existingIdx !== undefined) {
-          filteredEvents[existingIdx] = null as unknown as SandboxEvent;
-        }
-        seenTokens.set(event.messageId, filteredEvents.length);
-        filteredEvents.push(event);
-      } else {
-        // All other events (user_message, git_sync, etc.) - add as-is
-        filteredEvents.push(event);
-      }
-    }
-
-    return groupEvents(filteredEvents.filter(Boolean) as SandboxEvent[]);
-  }, [events]);
-
-  const resolvedRepoOwner = sessionState?.repoOwner ?? fallbackSessionInfo.repoOwner;
-  const resolvedRepoName = sessionState?.repoName ?? fallbackSessionInfo.repoName;
-  const fallbackRepoLabel =
-    resolvedRepoOwner && resolvedRepoName
-      ? `${resolvedRepoOwner}/${resolvedRepoName}`
-      : "Loading session...";
+  const groupedEvents = useMemo(() => dedupeAndGroupEvents(events), [events]);
   const persistedTitle = sessionState?.title || fallbackSessionInfo.title;
   const resolvedTitle = optimisticTitle || persistedTitle || fallbackRepoLabel;
   const showTimelineSkeleton = events.length === 0 && (connecting || replaying);

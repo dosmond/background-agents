@@ -141,7 +141,7 @@ development environment.
 - Debian Linux with common dev tools
 - Node.js 22, Python 3.12, git, curl
 - Package managers: npm, pnpm, pip, uv
-- Playwright + headless Chrome (for visual verification)
+- agent-browser CLI + headless Chrome (for browser automation)
 - OpenCode (the coding agent)
 
 **Why Modal?** Modal sandboxes start near-instantly and support filesystem snapshots. This lets us
@@ -173,39 +173,51 @@ cloud.
 When you create a session for a repo without an existing snapshot:
 
 ```
-┌─────────┐    ┌──────────┐    ┌─────────────┐    ┌─────────────┐    ┌───────┐
-│ Sandbox │───▶│ Git Sync │───▶│ Setup Script│───▶│ Agent Start │───▶│ Ready │
-│ Created │    │ (clone)  │    │ (optional)  │    │ (OpenCode)  │    │       │
-└─────────┘    └──────────┘    └─────────────┘    └─────────────┘    └───────┘
-                                     │
-                                     ▼
-                            .openinspect/setup.sh
-                            (if present in repo)
+┌─────────┐    ┌──────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌───────┐
+│ Sandbox │───▶│ Git Sync │───▶│ Setup Script│───▶│ Start Script│───▶│ Agent Start │───▶│ Ready │
+│ Created │    │ (clone)  │    │ (optional)  │    │ (optional)  │    │ (OpenCode)  │    │       │
+└─────────┘    └──────────┘    └─────────────┘    └─────────────┘    └─────────────┘    └───────┘
+                                     │                    │
+                                     ▼                    ▼
+                            .openinspect/setup.sh   .openinspect/start.sh
 ```
 
 1. **Sandbox created**: Modal spins up a new container from the base image
 2. **Git sync**: Clones your repository using GitHub App credentials
-3. **Setup script**: Runs `.openinspect/setup.sh` if present (for `npm install`, etc.)
-4. **Agent start**: OpenCode server starts and connects back to the control plane
-5. **Ready**: Sandbox accepts prompts
+3. **Setup script**: Runs `.openinspect/setup.sh` for provisioning (if present)
+4. **Start script**: Runs `.openinspect/start.sh` for runtime startup (if present)
+5. **Agent start**: OpenCode server starts and connects back to the control plane
+6. **Ready**: Sandbox accepts prompts
 
 ### Restore (From Snapshot)
 
 When restoring from a previous snapshot:
 
 ```
-┌─────────────┐    ┌────────────┐    ┌───────┐
-│  Restore    │───▶│ Quick Sync │───▶│ Ready │
-│  Snapshot   │    │ (git pull) │    │       │
-└─────────────┘    └────────────┘    └───────┘
+┌─────────────┐    ┌────────────┐    ┌─────────────┐    ┌───────┐
+│  Restore    │───▶│ Quick Sync │───▶│ Start Script│───▶│ Ready │
+│  Snapshot   │    │ (git pull) │    │ (optional)  │    │       │
+└─────────────┘    └────────────┘    └─────────────┘    └───────┘
 ```
 
 1. **Restore snapshot**: Modal restores the filesystem from a saved image
 2. **Quick sync**: Pulls latest changes (usually just a few commits)
-3. **Ready**: Sandbox is ready almost instantly
+3. **Start script**: Runs `.openinspect/start.sh` for runtime startup (if present)
+4. **Ready**: Sandbox is ready almost instantly
 
 Snapshots include installed dependencies, built artifacts, and workspace state. This is why
 follow-up prompts in an existing session are much faster than the first prompt.
+
+### Repo Image Start
+
+When starting from a pre-built repo image:
+
+1. **Incremental git sync**: Fast fetch + hard reset to latest branch head
+2. **Setup skipped**: `.openinspect/setup.sh` already ran when the image was built
+3. **Start script runs**: `.openinspect/start.sh` executes for per-session runtime startup
+4. **Ready**: Agent starts once runtime hook succeeds
+
+If `start.sh` exists and fails, startup fails fast instead of continuing with a broken runtime.
 
 ### When Snapshots Are Taken
 
@@ -367,10 +379,10 @@ That's potentially minutes before the agent can start working.
 Modal's filesystem snapshots let us capture a sandbox's state after setup:
 
 ```
-First session:  Clone ─▶ Install ─▶ Build ─▶ [Snapshot] ─▶ Work
-                         (slow)
+First session:  Clone ─▶ Install/Build ─▶ Start Runtime ─▶ [Snapshot] ─▶ Work
+                              (slow)
 
-Later sessions: [Restore Snapshot] ─▶ Quick sync ─▶ Work
+Later sessions: [Restore Snapshot] ─▶ Quick sync ─▶ Start Runtime ─▶ Work
                      (fast)
 ```
 

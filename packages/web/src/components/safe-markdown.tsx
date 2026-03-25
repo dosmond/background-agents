@@ -1,6 +1,7 @@
 "use client";
 
 import ReactMarkdown from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import type { ComponentPropsWithoutRef } from "react";
@@ -67,7 +68,7 @@ export function SafeMarkdown({ content, className = "" }: SafeMarkdownProps) {
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[[rehypeSanitize, sanitizeSchema]]}
+        rehypePlugins={[rehypeHighlight, [rehypeSanitize, sanitizeSchema]]}
         components={{
           // Custom link renderer - opens in new tab with security attributes
           a: ({ href, children, ...props }: ComponentPropsWithoutRef<"a">) => (
@@ -84,25 +85,27 @@ export function SafeMarkdown({ content, className = "" }: SafeMarkdownProps) {
           // Code blocks with styling
           pre: ({ children, ...props }: ComponentPropsWithoutRef<"pre">) => (
             <pre
-              className="bg-input text-foreground border border-border p-3 overflow-x-auto text-sm"
+              className="not-prose overflow-x-auto rounded border border-border bg-input p-3 text-[0.8125rem] leading-relaxed text-foreground"
               {...props}
             >
               {children}
             </pre>
           ),
-          // Inline code
           code: ({ className, children, ...props }: ComponentPropsWithoutRef<"code">) => {
-            // Check if this is a code block (has language class) or inline code
-            const isCodeBlock = className?.includes("language-");
-            if (isCodeBlock) {
+            // Code blocks: pass through hljs/language classes for syntax highlighting
+            if (className) {
               return (
                 <code className={className} {...props}>
                   {children}
                 </code>
               );
             }
+            // Inline code: explicit styling with background, border, and monospace
             return (
-              <code className="bg-muted text-foreground px-1.5 py-0.5 text-sm" {...props}>
+              <code
+                className="font-mono bg-muted border border-border rounded px-1.5 py-0.5 text-[0.85em]"
+                {...props}
+              >
                 {children}
               </code>
             );

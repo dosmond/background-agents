@@ -18,6 +18,9 @@
  *   child.info("Session started");
  */
 
+import type { Logger } from "@open-inspect/shared";
+export type { Logger } from "@open-inspect/shared";
+
 const LEVELS = { debug: 0, info: 1, warn: 2, error: 3 } as const;
 type LogLevel = keyof typeof LEVELS;
 
@@ -31,14 +34,6 @@ const CONSOLE_METHOD: Record<LogLevel, "log" | "warn" | "error"> = {
   warn: "warn",
   error: "error",
 };
-
-export interface Logger {
-  debug(msg: string, data?: Record<string, unknown>): void;
-  info(msg: string, data?: Record<string, unknown>): void;
-  warn(msg: string, data?: Record<string, unknown>): void;
-  error(msg: string, data?: Record<string, unknown>): void;
-  child(context: Record<string, unknown>): Logger;
-}
 
 /** Strip reserved keys from a record so callers cannot overwrite logger-owned fields. */
 function stripReserved(obj: Record<string, unknown>): Record<string, unknown> {
@@ -131,4 +126,8 @@ export interface CorrelationContext {
   trace_id: string;
   /** Per-hop request ID (short UUID), propagated via x-request-id header */
   request_id: string;
+  /** Optional session ID for deeper correlation in downstream services. */
+  session_id?: string;
+  /** Optional sandbox ID for sandbox-scoped operations. */
+  sandbox_id?: string;
 }

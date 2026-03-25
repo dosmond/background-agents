@@ -26,7 +26,7 @@ from .app import (
     internal_api_secret,
     validate_control_plane_url,
 )
-from .auth.internal import AuthConfigurationError, verify_internal_token
+from .auth import AuthConfigurationError, verify_internal_token
 from .log_config import configure_logging, get_logger
 
 configure_logging()
@@ -186,8 +186,6 @@ async def api_create_sandbox(
         "control_plane_url": "...",
         "sandbox_auth_token": "...",
         "snapshot_id": null,
-        "git_user_name": null,
-        "git_user_email": null,
         "provider": "anthropic",
         "model": "claude-sonnet-4-6"
     }
@@ -203,9 +201,9 @@ async def api_create_sandbox(
 
     try:
         # Import types and manager directly
-        from .auth.github_app import generate_installation_token
+        from .auth import generate_installation_token
+        from .sandbox import SessionConfig
         from .sandbox.manager import SandboxConfig, SandboxManager
-        from .sandbox.types import GitUser, SessionConfig
 
         manager = SandboxManager()
 
@@ -225,21 +223,14 @@ async def api_create_sandbox(
         except Exception as e:
             log.warn("github.token_error", exc=e)
 
-        # Build session config
-        git_user = None
-        git_user_name = request.get("git_user_name")
-        git_user_email = request.get("git_user_email")
-        if git_user_name and git_user_email:
-            git_user = GitUser(name=git_user_name, email=git_user_email)
-
         session_config = SessionConfig(
             session_id=request.get("session_id"),
             repo_owner=request.get("repo_owner"),
             repo_name=request.get("repo_name"),
+            branch=request.get("branch"),
             opencode_session_id=request.get("opencode_session_id"),
             provider=request.get("provider", "anthropic"),
             model=request.get("model", "claude-sonnet-4-6"),
-            git_user=git_user,
         )
 
         config = SandboxConfig(
@@ -253,6 +244,9 @@ async def api_create_sandbox(
             clone_token=github_app_token,
             user_env_vars=request.get("user_env_vars") or None,
             mcp_config=request.get("mcp_config") or None,
+            repo_image_id=request.get("repo_image_id") or None,
+            repo_image_sha=request.get("repo_image_sha") or None,
+            code_server_enabled=bool(request.get("code_server_enabled", False)),
         )
 
         handle = await manager.create_sandbox(config)
@@ -264,6 +258,8 @@ async def api_create_sandbox(
                 "modal_object_id": handle.modal_object_id,  # Modal's internal ID for snapshot API
                 "status": handle.status.value,
                 "created_at": handle.created_at,
+                "code_server_url": handle.code_server_url,
+                "code_server_password": handle.code_server_password,
             },
         }
     except Exception as e:
@@ -583,7 +579,7 @@ async def api_restore_sandbox(
         raise HTTPException(status_code=400, detail="snapshot_image_id is required")
 
     try:
-        from .auth.github_app import generate_installation_token
+        from .auth import generate_installation_token
         from .sandbox.manager import DEFAULT_SANDBOX_TIMEOUT_SECONDS, SandboxManager
 
         session_config = request.get("session_config", {})
@@ -610,6 +606,8 @@ async def api_restore_sandbox(
         except Exception as e:
             log.warn("github.token_error", exc=e)
 
+        code_server_enabled = bool(request.get("code_server_enabled", False))
+
         # Restore sandbox from snapshot
         handle = await manager.restore_from_snapshot(
             snapshot_image_id=snapshot_image_id,
@@ -621,6 +619,7 @@ async def api_restore_sandbox(
             user_env_vars=user_env_vars,
             mcp_config=mcp_config,
             timeout_seconds=timeout_seconds,
+            code_server_enabled=code_server_enabled,
         )
 
         return {
@@ -629,6 +628,8 @@ async def api_restore_sandbox(
                 "sandbox_id": handle.sandbox_id,
                 "modal_object_id": handle.modal_object_id,
                 "status": handle.status.value,
+                "code_server_url": handle.code_server_url,
+                "code_server_password": handle.code_server_password,
             },
         }
     except HTTPException as e:
@@ -731,12 +732,12 @@ async def api_git_changes(
         files: list[dict] = []
         diffs_by_file: dict[str, str] = {}
 
-        MAX_FILES = 100
-        MAX_DIFF_BYTES = 50000
-        MAX_TOTAL_DIFF_BYTES = 500000
+        max_files = 100
+        max_diff_bytes = 50000
+        max_total_diff_bytes = 500000
         total_diff_bytes = 0
 
-        for change in changes[:MAX_FILES]:
+        for change in changes[:max_files]:
             filename = change["filename"]
             status = change["status"]
             old_filename = change.get("old_filename")
@@ -744,7 +745,6 @@ async def api_git_changes(
             additions = stats["additions"]
             deletions = stats["deletions"]
 
-            # Untracked files are not included in git diff; synthesize add-only numstat.
             if status == "untracked":
                 wc_proc = handle.modal_sandbox.exec(
                     "bash",
@@ -793,11 +793,11 @@ async def api_git_changes(
                 continue
 
             encoded_len = len(diff_text.encode("utf-8", errors="ignore"))
-            if total_diff_bytes >= MAX_TOTAL_DIFF_BYTES:
+            if total_diff_bytes >= max_total_diff_bytes:
                 diffs_by_file[filename] = "# Diff omitted: payload budget exceeded."
                 continue
-            if encoded_len > MAX_DIFF_BYTES:
-                diff_text = diff_text[:MAX_DIFF_BYTES] + "\n# Diff truncated.\n"
+            if encoded_len > max_diff_bytes:
+                diff_text = diff_text[:max_diff_bytes] + "\n# Diff truncated.\n"
                 encoded_len = len(diff_text.encode("utf-8", errors="ignore"))
             total_diff_bytes += encoded_len
             diffs_by_file[filename] = diff_text
@@ -814,9 +814,8 @@ async def api_git_changes(
                 },
             },
         }
-    except HTTPException as e:
+    except HTTPException:
         outcome = "error"
-        http_status = e.status_code
         raise
     except Exception as e:
         outcome = "error"
@@ -837,4 +836,135 @@ async def api_git_changes(
             request_id=x_request_id,
             session_id=x_session_id,
             sandbox_id=x_sandbox_id or sandbox_id,
+        )
+
+
+@app.function(
+    image=function_image,
+    secrets=[internal_api_secret, github_app_secrets],
+)
+@fastapi_endpoint(method="POST")
+async def api_build_repo_image(
+    request: dict,
+    authorization: str | None = Header(None),
+    x_trace_id: str | None = Header(None),
+    x_request_id: str | None = Header(None),
+) -> dict:
+    """
+    Kick off an async image build. Returns immediately.
+    """
+    start_time = time.time()
+    http_status = 200
+    outcome = "success"
+
+    require_auth(authorization)
+
+    try:
+        from .scheduler.image_builder import build_repo_image
+
+        repo_owner = request.get("repo_owner")
+        repo_name = request.get("repo_name")
+        default_branch = request.get("default_branch", "main")
+        build_id = request.get("build_id", "")
+        callback_url = request.get("callback_url", "")
+        user_env_vars = request.get("user_env_vars") or None
+
+        if not repo_owner or not repo_name:
+            raise HTTPException(status_code=400, detail="repo_owner and repo_name are required")
+
+        if not build_id:
+            raise HTTPException(status_code=400, detail="build_id is required")
+
+        await build_repo_image.spawn.aio(
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            default_branch=default_branch,
+            callback_url=callback_url,
+            build_id=build_id,
+            user_env_vars=user_env_vars,
+        )
+
+        return {
+            "success": True,
+            "data": {
+                "build_id": build_id,
+                "status": "building",
+            },
+        }
+    except HTTPException:
+        outcome = "error"
+        raise
+    except Exception as e:
+        outcome = "error"
+        http_status = 500
+        log.error("api.error", exc=e, endpoint_name="api_build_repo_image")
+        return {"success": False, "error": str(e)}
+    finally:
+        duration_ms = int((time.time() - start_time) * 1000)
+        log.info(
+            "modal.http_request",
+            http_method="POST",
+            http_path="/api_build_repo_image",
+            http_status=http_status,
+            duration_ms=duration_ms,
+            outcome=outcome,
+            endpoint_name="api_build_repo_image",
+            trace_id=x_trace_id,
+            request_id=x_request_id,
+        )
+
+
+@app.function(
+    image=function_image,
+    secrets=[internal_api_secret],
+)
+@fastapi_endpoint(method="POST")
+async def api_delete_provider_image(
+    request: dict,
+    authorization: str | None = Header(None),
+    x_trace_id: str | None = Header(None),
+    x_request_id: str | None = Header(None),
+) -> dict:
+    """
+    Delete a single provider image (best-effort).
+    """
+    start_time = time.time()
+    http_status = 200
+    outcome = "success"
+
+    require_auth(authorization)
+
+    provider_image_id = request.get("provider_image_id")
+    if not provider_image_id:
+        raise HTTPException(status_code=400, detail="provider_image_id is required")
+
+    try:
+        log.info("image.delete_requested", provider_image_id=provider_image_id)
+        return {
+            "success": True,
+            "data": {
+                "provider_image_id": provider_image_id,
+                "deleted": True,
+            },
+        }
+    except HTTPException:
+        outcome = "error"
+        raise
+    except Exception as e:
+        outcome = "error"
+        http_status = 500
+        log.error("api.error", exc=e, endpoint_name="api_delete_provider_image")
+        return {"success": False, "error": str(e)}
+    finally:
+        duration_ms = int((time.time() - start_time) * 1000)
+        log.info(
+            "modal.http_request",
+            http_method="POST",
+            http_path="/api_delete_provider_image",
+            http_status=http_status,
+            duration_ms=duration_ms,
+            outcome=outcome,
+            endpoint_name="api_delete_provider_image",
+            trace_id=x_trace_id,
+            request_id=x_request_id,
         )

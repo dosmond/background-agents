@@ -25,8 +25,9 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   }
 
   try {
-    const response = await controlPlaneFetch(`/sessions/${id}`, {
+    const response = await controlPlaneFetch(`/sessions/${id}/title`, {
       method: "PATCH",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId, title: body.title }),
     });
 

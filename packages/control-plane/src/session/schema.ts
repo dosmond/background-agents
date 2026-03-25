@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS session (
   repo_owner TEXT NOT NULL,                         -- e.g., "acme-corp"
   repo_name TEXT NOT NULL,                          -- e.g., "web-app"
   repo_id INTEGER,                                  -- GitHub repository ID (stable)
-  repo_default_branch TEXT NOT NULL DEFAULT 'main', -- Base branch for PRs
+  base_branch TEXT NOT NULL DEFAULT 'main',          -- Base branch for PRs
   branch_name TEXT,                                 -- Working branch (set after first commit)
   base_sha TEXT,                                    -- SHA of base branch at session start
   current_sha TEXT,                                 -- Current HEAD SHA
@@ -25,7 +25,11 @@ CREATE TABLE IF NOT EXISTS session (
   provider_mode TEXT NOT NULL DEFAULT 'cursor',     -- 'cursor' or 'provider'
   provider_fallback_until_ms INTEGER,               -- When provider cooldown expires
   provider_fallback_reason TEXT,                    -- Why provider fallback is active
-  status TEXT DEFAULT 'created',                    -- 'created', 'active', 'completed', 'archived'
+  status TEXT DEFAULT 'created',                    -- 'created', 'active', 'completed', 'failed', 'archived', 'cancelled'
+  parent_session_id TEXT,                           -- Parent session ID (NULL for top-level)
+  spawn_source TEXT NOT NULL DEFAULT 'user',        -- 'user' or 'agent'
+  spawn_depth INTEGER NOT NULL DEFAULT 0,           -- 0 for top-level, parent.depth + 1 for children
+  code_server_enabled INTEGER NOT NULL DEFAULT 0,   -- 0 = disabled, 1 = enabled (opt-in)
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -102,6 +106,8 @@ CREATE TABLE IF NOT EXISTS sandbox (
   last_spawn_error_at INTEGER,                      -- Timestamp of last spawn error
   spawn_failure_count INTEGER DEFAULT 0,            -- Circuit breaker: consecutive spawn failures
   last_spawn_failure INTEGER,                       -- Timestamp of last spawn failure
+  code_server_url TEXT,                             -- Code-server tunnel URL (rotates on wake/restore)
+  code_server_password TEXT,                        -- Code-server password (rotates on each wake/restore)
   created_at INTEGER NOT NULL
 );
 
@@ -337,6 +343,43 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
     id: 27,
     description: "Add cursor_session_id to session",
     run: `ALTER TABLE session ADD COLUMN cursor_session_id TEXT`,
+  },
+  {
+    id: 28,
+    description: "Rename repo_default_branch to base_branch in session",
+    run: (sql) => {
+      const columns = sql.exec("PRAGMA table_info(session)").toArray() as Array<{
+        name: string;
+      }>;
+      const columnNames = new Set(columns.map((c) => c.name));
+      if (columnNames.has("repo_default_branch") && !columnNames.has("base_branch")) {
+        sql.exec(`ALTER TABLE session RENAME COLUMN repo_default_branch TO base_branch`);
+      }
+    },
+  },
+  {
+    id: 29,
+    description: "Add parent session tracking",
+    run: `
+      ALTER TABLE session ADD COLUMN parent_session_id TEXT;
+      ALTER TABLE session ADD COLUMN spawn_source TEXT NOT NULL DEFAULT 'user';
+      ALTER TABLE session ADD COLUMN spawn_depth INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
+  {
+    id: 30,
+    description: "Add code-server fields to sandbox",
+    // Two ALTER TABLE statements — partial failure is safe because runMigration()
+    // handles "column already exists" errors, so re-running is idempotent.
+    run: `
+      ALTER TABLE sandbox ADD COLUMN code_server_url TEXT;
+      ALTER TABLE sandbox ADD COLUMN code_server_password TEXT;
+    `,
+  },
+  {
+    id: 31,
+    description: "Add code_server_enabled to session",
+    run: `ALTER TABLE session ADD COLUMN code_server_enabled INTEGER NOT NULL DEFAULT 0`,
   },
 ];
 

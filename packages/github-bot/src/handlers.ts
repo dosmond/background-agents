@@ -12,6 +12,9 @@ import { generateInternalToken } from "./utils/internal";
 import { getGitHubConfig, type ResolvedGitHubConfig } from "./utils/integration-config";
 
 const ISSUE_MENTION_DEFAULT_MODEL = "openai/gpt-5.3-codex";
+export type HandlerResult =
+  | { outcome: "processed"; session_id: string; message_id: string; handler_action: string }
+  | { outcome: "skipped"; skip_reason: string };
 
 async function getAuthHeaders(env: Env, traceId: string): Promise<Record<string, string>> {
   const token = await generateInternalToken(env.INTERNAL_CALLBACK_SECRET);
@@ -23,7 +26,7 @@ async function getAuthHeaders(env: Env, traceId: string): Promise<Record<string,
 }
 
 async function createSession(
-  controlPlane: Fetcher,
+  controlPlane: Env["CONTROL_PLANE"],
   headers: Record<string, string>,
   params: {
     repoOwner: string;
@@ -56,7 +59,7 @@ async function createSession(
 }
 
 async function sendPrompt(
-  controlPlane: Fetcher,
+  controlPlane: Env["CONTROL_PLANE"],
   headers: Record<string, string>,
   sessionId: string,
   params: { content: string; authorId: string }
@@ -96,7 +99,10 @@ function fireAndForgetReaction(
 
 type CallerGatingResult =
   | { allowed: true; ghToken: string; headers: Record<string, string> }
-  | { allowed: false };
+  | {
+      allowed: false;
+      reason: "sender_not_allowed" | "sender_insufficient_permission" | "permission_check_failed";
+    };
 
 async function resolveCallerGating(
   env: Env,
@@ -111,7 +117,7 @@ async function resolveCallerGating(
   if (config.allowedTriggerUsers !== null) {
     if (!config.allowedTriggerUsers.some((u) => u.toLowerCase() === senderLogin.toLowerCase())) {
       log.info("handler.sender_not_allowed", { trace_id: traceId, sender: senderLogin });
-      return { allowed: false };
+      return { allowed: false, reason: "sender_not_allowed" };
     }
   }
 
@@ -132,11 +138,16 @@ async function resolveCallerGating(
       senderLogin
     );
     if (!hasPermission) {
+      const reason = error ? "permission_check_failed" : "sender_insufficient_permission";
       log.info(
         error ? "handler.permission_check_failed" : "handler.sender_insufficient_permission",
-        { trace_id: traceId, sender: senderLogin, repo: repoFullName }
+        {
+          trace_id: traceId,
+          sender: senderLogin,
+          repo: repoFullName,
+        }
       );
-      return { allowed: false };
+      return { allowed: false, reason };
     }
   }
 
@@ -148,7 +159,7 @@ export async function handleReviewRequested(
   log: Logger,
   payload: ReviewRequestedPayload,
   traceId: string
-): Promise<void> {
+): Promise<HandlerResult> {
   const { pull_request: pr, repository: repo, requested_reviewer, sender } = payload;
   const owner = repo.owner.login;
   const repoName = repo.name;
@@ -159,14 +170,14 @@ export async function handleReviewRequested(
       trace_id: traceId,
       requested_reviewer: requested_reviewer?.login,
     });
-    return;
+    return { outcome: "skipped", skip_reason: "review_not_for_bot" };
   }
 
-  const config = await getGitHubConfig(env, repoFullName);
+  const config = await getGitHubConfig(env, repoFullName, log);
 
   if (config.enabledRepos !== null && !config.enabledRepos.includes(repoFullName)) {
     log.debug("handler.repo_not_enabled", { trace_id: traceId, repo: repoFullName });
-    return;
+    return { outcome: "skipped", skip_reason: "repo_not_enabled" };
   }
 
   const gating = await resolveCallerGating(
@@ -179,7 +190,7 @@ export async function handleReviewRequested(
     traceId,
     repoFullName
   );
-  if (!gating.allowed) return;
+  if (!gating.allowed) return { outcome: "skipped", skip_reason: gating.reason };
   const { ghToken, headers } = gating;
 
   const meta = { trace_id: traceId, repo: repoFullName, pull_number: pr.number };
@@ -209,6 +220,7 @@ export async function handleReviewRequested(
     base: pr.base.ref,
     head: pr.head.ref,
     isPublic: !repo.private,
+    codeReviewInstructions: config.codeReviewInstructions,
   });
 
   const messageId = await sendPrompt(env.CONTROL_PLANE, headers, sessionId, {
@@ -222,6 +234,13 @@ export async function handleReviewRequested(
     source: "github",
     content_length: prompt.length,
   });
+
+  return {
+    outcome: "processed",
+    session_id: sessionId,
+    message_id: messageId,
+    handler_action: "review",
+  };
 }
 
 export async function handlePullRequestOpened(
@@ -229,7 +248,7 @@ export async function handlePullRequestOpened(
   log: Logger,
   payload: PullRequestOpenedPayload,
   traceId: string
-): Promise<void> {
+): Promise<HandlerResult> {
   const { pull_request: pr, repository: repo, sender } = payload;
   const owner = repo.owner.login;
   const repoName = repo.name;
@@ -237,24 +256,24 @@ export async function handlePullRequestOpened(
 
   if (pr.draft) {
     log.debug("handler.draft_pr_skipped", { trace_id: traceId, pull_number: pr.number });
-    return;
+    return { outcome: "skipped", skip_reason: "draft_pr" };
   }
 
   if (pr.user.login === env.GITHUB_BOT_USERNAME) {
     log.debug("handler.self_pr_ignored", { trace_id: traceId, pull_number: pr.number });
-    return;
+    return { outcome: "skipped", skip_reason: "self_pr" };
   }
 
-  const config = await getGitHubConfig(env, repoFullName);
+  const config = await getGitHubConfig(env, repoFullName, log);
 
   if (config.enabledRepos !== null && !config.enabledRepos.includes(repoFullName)) {
     log.debug("handler.repo_not_enabled", { trace_id: traceId, repo: repoFullName });
-    return;
+    return { outcome: "skipped", skip_reason: "repo_not_enabled" };
   }
 
   if (!config.autoReviewOnOpen) {
     log.debug("handler.auto_review_disabled", { trace_id: traceId, repo: repoFullName });
-    return;
+    return { outcome: "skipped", skip_reason: "auto_review_disabled" };
   }
 
   const gating = await resolveCallerGating(
@@ -267,7 +286,7 @@ export async function handlePullRequestOpened(
     traceId,
     repoFullName
   );
-  if (!gating.allowed) return;
+  if (!gating.allowed) return { outcome: "skipped", skip_reason: gating.reason };
   const { ghToken, headers } = gating;
 
   const meta = { trace_id: traceId, repo: repoFullName, pull_number: pr.number };
@@ -297,6 +316,7 @@ export async function handlePullRequestOpened(
     base: pr.base.ref,
     head: pr.head.ref,
     isPublic: !repo.private,
+    codeReviewInstructions: config.codeReviewInstructions,
   });
 
   const messageId = await sendPrompt(env.CONTROL_PLANE, headers, sessionId, {
@@ -310,6 +330,13 @@ export async function handlePullRequestOpened(
     source: "github",
     content_length: prompt.length,
   });
+
+  return {
+    outcome: "processed",
+    session_id: sessionId,
+    message_id: messageId,
+    handler_action: "auto_review",
+  };
 }
 
 export async function handleIssueComment(
@@ -317,7 +344,7 @@ export async function handleIssueComment(
   log: Logger,
   payload: IssueCommentPayload,
   traceId: string
-): Promise<void> {
+): Promise<HandlerResult> {
   const { issue, comment, repository: repo, sender } = payload;
   const owner = repo.owner.login;
   const repoName = repo.name;
@@ -329,19 +356,19 @@ export async function handleIssueComment(
       issue_number: issue.number,
       sender: sender.login,
     });
-    return;
+    return { outcome: "skipped", skip_reason: "no_mention" };
   }
 
   if (sender.login === env.GITHUB_BOT_USERNAME) {
     log.debug("handler.self_comment_ignored", { trace_id: traceId });
-    return;
+    return { outcome: "skipped", skip_reason: "self_comment" };
   }
 
-  const config = await getGitHubConfig(env, repoFullName);
+  const config = await getGitHubConfig(env, repoFullName, log);
 
   if (config.enabledRepos !== null && !config.enabledRepos.includes(repoFullName)) {
     log.debug("handler.repo_not_enabled", { trace_id: traceId, repo: repoFullName });
-    return;
+    return { outcome: "skipped", skip_reason: "repo_not_enabled" };
   }
 
   const gating = await resolveCallerGating(
@@ -354,7 +381,7 @@ export async function handleIssueComment(
     traceId,
     repoFullName
   );
-  if (!gating.allowed) return;
+  if (!gating.allowed) return { outcome: "skipped", skip_reason: gating.reason };
   const { ghToken, headers } = gating;
 
   const commentBody = stripMention(comment.body, env.GITHUB_BOT_USERNAME);
@@ -399,6 +426,7 @@ export async function handleIssueComment(
         commentBody,
         commenter: sender.login,
         isPublic: !repo.private,
+        commentActionInstructions: config.commentActionInstructions,
       })
     : buildIssueActionPrompt({
         owner,
@@ -421,6 +449,13 @@ export async function handleIssueComment(
     source: "github",
     content_length: prompt.length,
   });
+
+  return {
+    outcome: "processed",
+    session_id: sessionId,
+    message_id: messageId,
+    handler_action: "comment",
+  };
 }
 
 export async function handleReviewComment(
@@ -428,7 +463,7 @@ export async function handleReviewComment(
   log: Logger,
   payload: ReviewCommentPayload,
   traceId: string
-): Promise<void> {
+): Promise<HandlerResult> {
   const { pull_request: pr, comment, repository: repo, sender } = payload;
   const owner = repo.owner.login;
   const repoName = repo.name;
@@ -440,19 +475,19 @@ export async function handleReviewComment(
       pull_number: pr.number,
       sender: sender.login,
     });
-    return;
+    return { outcome: "skipped", skip_reason: "no_mention" };
   }
 
   if (sender.login === env.GITHUB_BOT_USERNAME) {
     log.debug("handler.self_comment_ignored", { trace_id: traceId });
-    return;
+    return { outcome: "skipped", skip_reason: "self_comment" };
   }
 
-  const config = await getGitHubConfig(env, repoFullName);
+  const config = await getGitHubConfig(env, repoFullName, log);
 
   if (config.enabledRepos !== null && !config.enabledRepos.includes(repoFullName)) {
     log.debug("handler.repo_not_enabled", { trace_id: traceId, repo: repoFullName });
-    return;
+    return { outcome: "skipped", skip_reason: "repo_not_enabled" };
   }
 
   const gating = await resolveCallerGating(
@@ -465,7 +500,7 @@ export async function handleReviewComment(
     traceId,
     repoFullName
   );
-  if (!gating.allowed) return;
+  if (!gating.allowed) return { outcome: "skipped", skip_reason: gating.reason };
   const { ghToken, headers } = gating;
 
   const commentBody = stripMention(comment.body, env.GITHUB_BOT_USERNAME);
@@ -500,6 +535,7 @@ export async function handleReviewComment(
     filePath: comment.path,
     diffHunk: comment.diff_hunk,
     commentId: comment.id,
+    commentActionInstructions: config.commentActionInstructions,
   });
 
   const messageId = await sendPrompt(env.CONTROL_PLANE, headers, sessionId, {
@@ -513,4 +549,11 @@ export async function handleReviewComment(
     source: "github",
     content_length: prompt.length,
   });
+
+  return {
+    outcome: "processed",
+    session_id: sessionId,
+    message_id: messageId,
+    handler_action: "review_comment",
+  };
 }

@@ -4,6 +4,7 @@
 
 import {
   isValidReasoningEffort,
+  type CodeServerSettings,
   type GitHubBotSettings,
   type IntegrationId,
   type LinearBotSettings,
@@ -308,6 +309,8 @@ async function handleGetResolvedConfig(
         autoReviewOnOpen: githubSettings.autoReviewOnOpen ?? true,
         enabledRepos,
         allowedTriggerUsers: githubSettings.allowedTriggerUsers ?? null,
+        codeReviewInstructions: githubSettings.codeReviewInstructions ?? null,
+        commentActionInstructions: githubSettings.commentActionInstructions ?? null,
       },
     });
   }
@@ -330,6 +333,19 @@ async function handleGetResolvedConfig(
         allowUserPreferenceOverride: linearSettings.allowUserPreferenceOverride ?? true,
         allowLabelModelOverride: linearSettings.allowLabelModelOverride ?? true,
         emitToolProgressActivities: linearSettings.emitToolProgressActivities ?? true,
+        issueSessionInstructions: linearSettings.issueSessionInstructions ?? null,
+        enabledRepos,
+      },
+    });
+  }
+
+  if (id === "code-server") {
+    const codeServerSettings = settings as CodeServerSettings;
+    return json({
+      integrationId: id,
+      repo,
+      config: {
+        enabled: codeServerSettings.enabled ?? false,
         enabledRepos,
       },
     });

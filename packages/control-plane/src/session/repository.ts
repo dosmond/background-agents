@@ -20,6 +20,7 @@ import type {
   MessageStatus,
   MessageSource,
   ParticipantRole,
+  SpawnSource,
   ArtifactType,
   SandboxEvent,
 } from "../types";
@@ -62,6 +63,7 @@ export interface UpsertSessionData {
   repoOwner: string;
   repoName: string;
   repoId?: number | null;
+  baseBranch?: string;
   model: string;
   reasoningEffort?: string | null;
   cursorSessionId?: string | null;
@@ -69,6 +71,10 @@ export interface UpsertSessionData {
   providerFallbackUntilMs?: number | null;
   providerFallbackReason?: ProviderFallbackReason | null;
   status: SessionStatus;
+  parentSessionId?: string | null;
+  spawnSource?: SpawnSource;
+  spawnDepth?: number;
+  codeServerEnabled?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -211,24 +217,50 @@ export interface SqlResult {
 export class SessionRepository {
   constructor(private readonly sql: SqlStorage) {}
 
+  private rows<T>(result: SqlResult): T[] {
+    return result.toArray() as T[];
+  }
+
   // === SESSION ===
 
   getSession(): SessionRow | null {
     const result = this.sql.exec(`SELECT * FROM session LIMIT 1`);
-    const rows = result.toArray() as unknown as SessionRow[];
+    const rows = this.rows<SessionRow>(result);
     return rows[0] ?? null;
   }
 
   upsertSession(data: UpsertSessionData): void {
     this.sql.exec(
-      `INSERT OR REPLACE INTO session (id, session_name, title, repo_owner, repo_name, repo_id, model, reasoning_effort, cursor_session_id, provider_mode, provider_fallback_until_ms, provider_fallback_reason, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO session (
+         id,
+         session_name,
+         title,
+         repo_owner,
+         repo_name,
+         repo_id,
+         base_branch,
+         model,
+         reasoning_effort,
+         cursor_session_id,
+         provider_mode,
+         provider_fallback_until_ms,
+         provider_fallback_reason,
+         status,
+         parent_session_id,
+         spawn_source,
+         spawn_depth,
+         code_server_enabled,
+         created_at,
+         updated_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       data.id,
       data.sessionName,
       data.title,
       data.repoOwner,
       data.repoName,
       data.repoId ?? null,
+      data.baseBranch ?? "main",
       data.model,
       data.reasoningEffort ?? null,
       data.cursorSessionId ?? null,
@@ -236,6 +268,10 @@ export class SessionRepository {
       data.providerFallbackUntilMs ?? null,
       data.providerFallbackReason ?? null,
       data.status,
+      data.parentSessionId ?? null,
+      data.spawnSource ?? "user",
+      data.spawnDepth ?? 0,
+      data.codeServerEnabled ? 1 : 0,
       data.createdAt,
       data.updatedAt
     );
@@ -311,7 +347,7 @@ export class SessionRepository {
 
   getSandbox(): SandboxRow | null {
     const result = this.sql.exec(`SELECT * FROM sandbox LIMIT 1`);
-    const rows = result.toArray() as unknown as SandboxRow[];
+    const rows = this.rows<SandboxRow>(result);
     return rows[0] ?? null;
   }
 
@@ -319,7 +355,7 @@ export class SessionRepository {
     const result = this.sql.exec(
       `SELECT status, created_at, snapshot_image_id, spawn_failure_count, last_spawn_failure FROM sandbox LIMIT 1`
     );
-    const rows = result.toArray() as unknown as SandboxCircuitBreakerState[];
+    const rows = this.rows<SandboxCircuitBreakerState>(result);
     return rows[0] ?? null;
   }
 
@@ -397,6 +433,20 @@ export class SessionRepository {
     );
   }
 
+  updateSandboxCodeServer(url: string, password: string): void {
+    this.sql.exec(
+      `UPDATE sandbox SET code_server_url = ?, code_server_password = ? WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
+      url,
+      password
+    );
+  }
+
+  clearSandboxCodeServer(): void {
+    this.sql.exec(
+      `UPDATE sandbox SET code_server_url = NULL, code_server_password = NULL WHERE id = (SELECT id FROM sandbox LIMIT 1)`
+    );
+  }
+
   resetCircuitBreaker(): void {
     this.sql.exec(
       `UPDATE sandbox SET spawn_failure_count = 0 WHERE id = (SELECT id FROM sandbox LIMIT 1)`
@@ -417,19 +467,19 @@ export class SessionRepository {
 
   getParticipantByUserId(userId: string): ParticipantRow | null {
     const result = this.sql.exec(`SELECT * FROM participants WHERE user_id = ?`, userId);
-    const rows = result.toArray() as unknown as ParticipantRow[];
+    const rows = this.rows<ParticipantRow>(result);
     return rows[0] ?? null;
   }
 
   getParticipantByWsTokenHash(tokenHash: string): ParticipantRow | null {
     const result = this.sql.exec(`SELECT * FROM participants WHERE ws_auth_token = ?`, tokenHash);
-    const rows = result.toArray() as unknown as ParticipantRow[];
+    const rows = this.rows<ParticipantRow>(result);
     return rows[0] ?? null;
   }
 
   getParticipantById(participantId: string): ParticipantRow | null {
     const result = this.sql.exec(`SELECT * FROM participants WHERE id = ?`, participantId);
-    const rows = result.toArray() as unknown as ParticipantRow[];
+    const rows = this.rows<ParticipantRow>(result);
     return rows[0] ?? null;
   }
 
@@ -505,7 +555,7 @@ export class SessionRepository {
 
   listParticipants(): ParticipantRow[] {
     const result = this.sql.exec(`SELECT * FROM participants ORDER BY joined_at`);
-    return result.toArray() as unknown as ParticipantRow[];
+    return this.rows<ParticipantRow>(result);
   }
 
   // === MESSAGES ===
@@ -540,7 +590,7 @@ export class SessionRepository {
     const result = this.sql.exec(
       `SELECT * FROM messages WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1`
     );
-    const rows = result.toArray() as unknown as MessageRow[];
+    const rows = this.rows<MessageRow>(result);
     return rows[0] ?? null;
   }
 
@@ -622,7 +672,7 @@ export class SessionRepository {
     params.push(options.limit + 1);
 
     const result = this.sql.exec(query, ...params);
-    return result.toArray() as unknown as MessageRow[];
+    return this.rows<MessageRow>(result);
   }
 
   // === EVENTS ===
@@ -696,7 +746,7 @@ export class SessionRepository {
     params.push(options.limit + 1);
 
     const result = this.sql.exec(query, ...params);
-    return result.toArray() as unknown as EventRow[];
+    return this.rows<EventRow>(result);
   }
 
   getEventsForReplay(limit: number): EventRow[] {
@@ -707,7 +757,7 @@ export class SessionRepository {
        ) sub ORDER BY created_at ASC, id ASC`,
       limit
     );
-    return result.toArray() as unknown as EventRow[];
+    return this.rows<EventRow>(result);
   }
 
   /**
@@ -722,16 +772,15 @@ export class SessionRepository {
     events: EventRow[];
     hasMore: boolean;
   } {
-    const rows = this.sql
-      .exec(
-        `SELECT * FROM events
+    const result = this.sql.exec(
+      `SELECT * FROM events
          WHERE type != 'heartbeat' AND ((created_at < ?1) OR (created_at = ?1 AND id < ?2))
          ORDER BY created_at DESC, id DESC LIMIT ?3`,
-        cursorTimestamp,
-        cursorId,
-        limit + 1
-      )
-      .toArray() as unknown as EventRow[];
+      cursorTimestamp,
+      cursorId,
+      limit + 1
+    );
+    const rows = this.rows<EventRow>(result);
 
     const hasMore = rows.length > limit;
     if (hasMore) rows.pop();
@@ -756,7 +805,7 @@ export class SessionRepository {
 
   listArtifacts(): ArtifactRow[] {
     const result = this.sql.exec(`SELECT * FROM artifacts ORDER BY created_at DESC`);
-    return result.toArray() as unknown as ArtifactRow[];
+    return this.rows<ArtifactRow>(result);
   }
 
   // === WS CLIENT MAPPING ===
@@ -780,7 +829,7 @@ export class SessionRepository {
        WHERE m.ws_id = ?`,
       wsId
     );
-    const rows = result.toArray() as unknown as WsClientMappingResult[];
+    const rows = this.rows<WsClientMappingResult>(result);
     return rows[0] ?? null;
   }
 

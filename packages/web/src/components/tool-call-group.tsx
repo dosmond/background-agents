@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useState } from "react";
-import type { SandboxEvent } from "@/lib/tool-formatters";
+import type { SandboxEvent } from "@/types/session";
 import { formatToolGroup } from "@/lib/tool-formatters";
 import { ToolCallItem } from "./tool-call-item";
 import {
@@ -20,6 +20,8 @@ function ToolIcon({ toolName }: { toolName: string }) {
       return <FileIcon className={iconClass} />;
     case "Edit":
       return <PencilIcon className={iconClass} />;
+    case "Apply Patch":
+      return <PencilIcon className={iconClass} />;
     case "Bash":
       return <TerminalIcon className={iconClass} />;
     default:
@@ -28,7 +30,13 @@ function ToolIcon({ toolName }: { toolName: string }) {
 }
 
 export const ToolCallGroup = memo(
-  function ToolCallGroup({ events, groupId }: { events: SandboxEvent[]; groupId: string }) {
+  function ToolCallGroup({
+    events,
+    groupId,
+  }: {
+    events: Array<Extract<SandboxEvent, { type: "tool_call" }>>;
+    groupId: string;
+  }) {
     const [isExpanded, setIsExpanded] = useState(false);
     const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
 

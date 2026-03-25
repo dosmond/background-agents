@@ -8,6 +8,7 @@ import Link from "next/link";
 import { useSidebarContext } from "@/components/sidebar-layout";
 import { formatModelNameLower } from "@/lib/format";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
+import { SIDEBAR_SESSIONS_KEY } from "@/lib/session-list";
 import {
   DEFAULT_MODEL,
   getDefaultReasoningEffort,
@@ -16,9 +17,17 @@ import {
 } from "@open-inspect/shared";
 import { useEnabledModels } from "@/hooks/use-enabled-models";
 import { useRepos, type Repo } from "@/hooks/use-repos";
+import { useBranches } from "@/hooks/use-branches";
 import { ReasoningEffortPills } from "@/components/reasoning-effort-pills";
 import { DanstackLogo } from "@/components/ui/danstack-logo";
-import { SidebarIcon, RepoIcon, ModelIcon, ChevronDownIcon, SendIcon } from "@/components/ui/icons";
+import {
+  SidebarIcon,
+  RepoIcon,
+  ModelIcon,
+  BranchIcon,
+  ChevronDownIcon,
+  SendIcon,
+} from "@/components/ui/icons";
 import { Combobox, type ComboboxGroup } from "@/components/ui/combobox";
 
 const LAST_SELECTED_REPO_STORAGE_KEY = "open-inspect-last-selected-repo";
@@ -34,6 +43,7 @@ export default function Home() {
   const [reasoningEffort, setReasoningEffort] = useState<string | undefined>(
     getDefaultReasoningEffort(DEFAULT_MODEL)
   );
+  const [selectedBranch, setSelectedBranch] = useState<string>("");
   const [prompt, setPrompt] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
@@ -41,9 +51,12 @@ export default function Home() {
   const [isCreatingSession, setIsCreatingSession] = useState(false);
   const sessionCreationPromise = useRef<Promise<string | null> | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
-  const pendingConfigRef = useRef<{ repo: string; model: string } | null>(null);
-  const hasHydratedModelPreferences = useRef(false);
+  const pendingConfigRef = useRef<{ repo: string; model: string; branch: string } | null>(null);
+  const [hasHydratedModelPreferences, setHasHydratedModelPreferences] = useState(false);
   const { enabledModels, enabledModelOptions } = useEnabledModels();
+  const selectedRepoOwner = selectedRepo.split("/")[0] ?? "";
+  const selectedRepoName = selectedRepo.split("/")[1] ?? "";
+  const { branches, loading: loadingBranches } = useBranches(selectedRepoOwner, selectedRepoName);
 
   // Auto-select repo when repos load
   useEffect(() => {
@@ -53,6 +66,8 @@ export default function Home() {
       const defaultRepo =
         (hasLastSelectedRepo ? lastSelectedRepo : repos[0].fullName) ?? repos[0].fullName;
       setSelectedRepo(defaultRepo);
+      const repo = repos.find((r) => r.fullName === defaultRepo);
+      if (repo) setSelectedBranch(repo.defaultBranch);
     }
   }, [repos, selectedRepo]);
 
@@ -62,7 +77,7 @@ export default function Home() {
   }, [selectedRepo]);
 
   useEffect(() => {
-    if (enabledModels.length === 0 || hasHydratedModelPreferences.current) return;
+    if (enabledModels.length === 0 || hasHydratedModelPreferences) return;
 
     const storedModel = localStorage.getItem(LAST_SELECTED_MODEL_STORAGE_KEY);
     const selectedModelFromStorage =
@@ -79,11 +94,11 @@ export default function Home() {
 
     setSelectedModel(selectedModelFromStorage);
     setReasoningEffort(reasoningEffortFromStorage);
-    hasHydratedModelPreferences.current = true;
-  }, [enabledModels]);
+    setHasHydratedModelPreferences(true);
+  }, [enabledModels, hasHydratedModelPreferences]);
 
   useEffect(() => {
-    if (!hasHydratedModelPreferences.current) return;
+    if (!hasHydratedModelPreferences) return;
     localStorage.setItem(LAST_SELECTED_MODEL_STORAGE_KEY, selectedModel);
 
     if (reasoningEffort) {
@@ -92,7 +107,7 @@ export default function Home() {
     }
 
     localStorage.removeItem(LAST_SELECTED_REASONING_EFFORT_STORAGE_KEY);
-  }, [selectedModel, reasoningEffort]);
+  }, [hasHydratedModelPreferences, selectedModel, reasoningEffort]);
 
   useEffect(() => {
     if (abortControllerRef.current) {
@@ -103,7 +118,7 @@ export default function Home() {
     setIsCreatingSession(false);
     sessionCreationPromise.current = null;
     pendingConfigRef.current = null;
-  }, [selectedRepo, selectedModel]);
+  }, [selectedRepo, selectedModel, selectedBranch]);
 
   const createSessionForWarming = useCallback(async () => {
     if (pendingSessionId) return pendingSessionId;
@@ -112,7 +127,7 @@ export default function Home() {
 
     setIsCreatingSession(true);
     const [owner, name] = selectedRepo.split("/");
-    const currentConfig = { repo: selectedRepo, model: selectedModel };
+    const currentConfig = { repo: selectedRepo, model: selectedModel, branch: selectedBranch };
     pendingConfigRef.current = currentConfig;
 
     const abortController = new AbortController();
@@ -128,6 +143,7 @@ export default function Home() {
             repoName: name,
             model: selectedModel,
             reasoningEffort,
+            branch: selectedBranch || undefined,
           }),
           signal: abortController.signal,
         });
@@ -136,7 +152,8 @@ export default function Home() {
           const data = await res.json();
           if (
             pendingConfigRef.current?.repo === currentConfig.repo &&
-            pendingConfigRef.current?.model === currentConfig.model
+            pendingConfigRef.current?.model === currentConfig.model &&
+            pendingConfigRef.current?.branch === currentConfig.branch
           ) {
             setPendingSessionId(data.sessionId);
             return data.sessionId as string;
@@ -161,10 +178,12 @@ export default function Home() {
 
     sessionCreationPromise.current = promise;
     return promise;
-  }, [selectedRepo, selectedModel, reasoningEffort, pendingSessionId]);
+  }, [selectedRepo, selectedModel, reasoningEffort, selectedBranch, pendingSessionId]);
 
-  // Reset selections when model preferences change
+  // Reset selections when model preferences change (only after hydration)
   useEffect(() => {
+    if (!hasHydratedModelPreferences) return;
+
     if (enabledModels.length > 0 && !enabledModels.includes(selectedModel)) {
       const fallback = enabledModels[0] ?? DEFAULT_MODEL;
       setSelectedModel(fallback);
@@ -175,7 +194,16 @@ export default function Home() {
     if (reasoningEffort && !isValidReasoningEffort(selectedModel, reasoningEffort)) {
       setReasoningEffort(getDefaultReasoningEffort(selectedModel));
     }
-  }, [enabledModels, selectedModel, reasoningEffort]);
+  }, [hasHydratedModelPreferences, enabledModels, selectedModel, reasoningEffort]);
+
+  const handleRepoChange = useCallback(
+    (repoFullName: string) => {
+      setSelectedRepo(repoFullName);
+      const repo = repos.find((r) => r.fullName === repoFullName);
+      if (repo) setSelectedBranch(repo.defaultBranch);
+    },
+    [repos]
+  );
 
   const handleModelChange = useCallback((model: string) => {
     setSelectedModel(model);
@@ -224,7 +252,7 @@ export default function Home() {
       });
 
       if (res.ok) {
-        mutate("/api/sessions");
+        mutate(SIDEBAR_SESSIONS_KEY);
         router.push(`/session/${sessionId}`);
       } else {
         const data = await res.json();
@@ -243,7 +271,11 @@ export default function Home() {
       repos={repos}
       loadingRepos={loadingRepos}
       selectedRepo={selectedRepo}
-      setSelectedRepo={setSelectedRepo}
+      setSelectedRepo={handleRepoChange}
+      selectedBranch={selectedBranch}
+      setSelectedBranch={setSelectedBranch}
+      branches={branches}
+      loadingBranches={loadingBranches}
       selectedModel={selectedModel}
       setSelectedModel={handleModelChange}
       reasoningEffort={reasoningEffort}
@@ -265,6 +297,10 @@ function HomeContent({
   loadingRepos,
   selectedRepo,
   setSelectedRepo,
+  selectedBranch,
+  setSelectedBranch,
+  branches,
+  loadingBranches,
   selectedModel,
   setSelectedModel,
   reasoningEffort,
@@ -282,6 +318,10 @@ function HomeContent({
   loadingRepos: boolean;
   selectedRepo: string;
   setSelectedRepo: (value: string) => void;
+  selectedBranch: string;
+  setSelectedBranch: (value: string) => void;
+  branches: { name: string }[];
+  loadingBranches: boolean;
   selectedModel: string;
   setSelectedModel: (value: string) => void;
   reasoningEffort: string | undefined;
@@ -300,7 +340,7 @@ function HomeContent({
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.nativeEvent.isComposing) return;
 
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       handleSubmit(e);
     }
@@ -405,6 +445,29 @@ function HomeContent({
                       <RepoIcon className="w-4 h-4" />
                       <span className="truncate max-w-[12rem] sm:max-w-none">
                         {loadingRepos ? "Loading..." : displayRepoName}
+                      </span>
+                      <ChevronDownIcon className="w-3 h-3" />
+                    </Combobox>
+
+                    {/* Branch selector */}
+                    <Combobox
+                      value={selectedBranch}
+                      onChange={(value) => setSelectedBranch(value)}
+                      items={branches.map((b) => ({
+                        value: b.name,
+                        label: b.name,
+                      }))}
+                      searchable
+                      searchPlaceholder="Search branches..."
+                      filterFn={(option, query) => option.label.toLowerCase().includes(query)}
+                      direction="up"
+                      dropdownWidth="w-56"
+                      disabled={creating || !selectedRepo || loadingBranches}
+                      triggerClassName="flex max-w-full items-center gap-1 text-sm text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed transition"
+                    >
+                      <BranchIcon className="w-3.5 h-3.5" />
+                      <span className="truncate max-w-[9rem] sm:max-w-none">
+                        {loadingBranches ? "Loading..." : selectedBranch || "branch"}
                       </span>
                       <ChevronDownIcon className="w-3 h-3" />
                     </Combobox>

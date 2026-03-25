@@ -10,6 +10,8 @@ import { DataControlsSettings } from "@/components/settings/data-controls-settin
 import { KeyboardShortcutsSettings } from "@/components/settings/keyboard-shortcuts-settings";
 import { IntegrationsSettings } from "@/components/settings/integrations-settings";
 import { ThemeSettings } from "@/components/settings/theme-settings";
+import { ImagesSettings } from "@/components/settings/images-settings";
+import { AppearanceSettings } from "@/components/settings/appearance-settings";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
 import { SidebarIcon, BackIcon } from "@/components/ui/icons";
 import { useIsMobile } from "@/hooks/use-media-query";
@@ -17,6 +19,7 @@ import { useIsMobile } from "@/hooks/use-media-query";
 const CATEGORY_LABELS: Record<SettingsCategory, string> = {
   secrets: "Secrets",
   models: "Models",
+  images: "Images",
   appearance: "Appearance",
   "keyboard-shortcuts": "Keyboard",
   "data-controls": "Data Controls",
@@ -26,6 +29,7 @@ const CATEGORY_LABELS: Record<SettingsCategory, string> = {
 const VALID_CATEGORIES = new Set<string>([
   "secrets",
   "models",
+  "images",
   "appearance",
   "keyboard-shortcuts",
   "data-controls",
@@ -41,7 +45,12 @@ export default function SettingsPage() {
   const searchParams = useSearchParams();
   const tabParam = searchParams.get("tab");
   const initialCategory = isValidCategory(tabParam) ? tabParam : "secrets";
-  const [activeCategory, setActiveCategory] = useState<SettingsCategory>(initialCategory);
+  const [activeCategory, setActiveCategoryRaw] = useState<SettingsCategory>(initialCategory);
+
+  function setActiveCategory(category: SettingsCategory) {
+    setActiveCategoryRaw(category);
+    window.history.replaceState(null, "", `/settings?tab=${category}`);
+  }
   const isMobile = useIsMobile();
   const [mobileView, setMobileView] = useState<"list" | "detail">(
     isValidCategory(tabParam) ? "detail" : "list"
@@ -50,7 +59,7 @@ export default function SettingsPage() {
   // Sync state when searchParams change via client-side navigation
   useEffect(() => {
     if (isValidCategory(tabParam)) {
-      setActiveCategory(tabParam);
+      setActiveCategoryRaw(tabParam);
       setMobileView("detail");
     }
   }, [tabParam]);
@@ -59,7 +68,13 @@ export default function SettingsPage() {
     <>
       {activeCategory === "secrets" && <SecretsSettings />}
       {activeCategory === "models" && <ModelsSettings />}
-      {activeCategory === "appearance" && <ThemeSettings />}
+      {activeCategory === "images" && <ImagesSettings />}
+      {activeCategory === "appearance" && (
+        <div className="space-y-8">
+          <ThemeSettings />
+          <AppearanceSettings />
+        </div>
+      )}
       {activeCategory === "keyboard-shortcuts" && <KeyboardShortcutsSettings />}
       {activeCategory === "data-controls" && <DataControlsSettings />}
       {activeCategory === "integrations" && <IntegrationsSettings />}

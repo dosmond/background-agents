@@ -1,18 +1,28 @@
-import type { ReactNode } from "react";
+import * as React from "react";
+import { cva, type VariantProps } from "class-variance-authority";
 
-type BadgeVariant = "default" | "pr-merged" | "pr-closed" | "pr-draft" | "pr-open" | "info" | "kbd";
+import { cn } from "@/lib/utils";
 
-const variantClasses: Record<BadgeVariant, string> = {
-  default: "bg-muted text-muted-foreground",
-  "pr-merged": "bg-success-muted text-success",
-  "pr-closed": "bg-destructive-muted text-destructive",
-  "pr-draft": "bg-muted text-muted-foreground",
-  "pr-open": "bg-accent-muted text-accent",
-  info: "bg-info-muted text-info border border-info/30",
-  kbd: "font-mono text-muted-foreground border border-border bg-input rounded",
-};
+const badgeVariants = cva("inline-flex items-center px-1.5 py-0.5 text-xs font-medium", {
+  variants: {
+    variant: {
+      default: "bg-muted text-muted-foreground",
+      "pr-merged": "bg-success-muted text-success",
+      "pr-closed": "bg-destructive-muted text-destructive",
+      "pr-draft": "bg-muted text-muted-foreground",
+      "pr-open": "bg-accent-muted text-accent",
+      info: "border border-info/30 bg-info-muted text-info",
+      kbd: "font-mono text-muted-foreground border border-border bg-input rounded",
+    },
+  },
+  defaultVariants: {
+    variant: "default",
+  },
+});
 
-export function prBadgeVariant(state: string): BadgeVariant {
+export function prBadgeVariant(
+  state: string
+): NonNullable<VariantProps<typeof badgeVariants>["variant"]> {
   switch (state) {
     case "merged":
       return "pr-merged";
@@ -26,18 +36,11 @@ export function prBadgeVariant(state: string): BadgeVariant {
   }
 }
 
-interface BadgeProps {
-  variant?: BadgeVariant;
-  className?: string;
-  children: ReactNode;
+interface BadgeProps
+  extends React.HTMLAttributes<HTMLSpanElement>, VariantProps<typeof badgeVariants> {}
+
+function Badge({ className, variant, ...props }: BadgeProps) {
+  return <span className={cn(badgeVariants({ variant }), className)} {...props} />;
 }
 
-export function Badge({ variant = "default", className = "", children }: BadgeProps) {
-  return (
-    <span
-      className={`px-1.5 py-0.5 text-xs font-medium ${variantClasses[variant]} ${className}`.trim()}
-    >
-      {children}
-    </span>
-  );
-}
+export { Badge, badgeVariants };

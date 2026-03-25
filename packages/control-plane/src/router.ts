@@ -10,15 +10,19 @@ import {
   SourceControlProviderError,
   type SourceControlProviderName,
 } from "./source-control";
+import { IntegrationSettingsStore } from "./db/integration-settings";
 import { SessionIndexStore } from "./db/session-index";
 import { UserScmTokenStore, DEFAULT_TOKEN_LIFETIME_MS } from "./db/user-scm-tokens";
+import { buildSessionInternalUrl, SessionInternalPaths } from "./session/contracts";
 
 import {
   getValidModelOrDefault,
   isValidReasoningEffort,
-  MAX_SESSION_TITLE_LENGTH,
-  trimSessionTitle,
+  type CodeServerSettings,
+  type SessionStatus,
   type CallbackContext,
+  type SpawnChildSessionRequest,
+  type SpawnContext,
 } from "@open-inspect/shared";
 import { createRequestMetrics, instrumentD1 } from "./db/instrumented-d1";
 import { createLogger } from "./logger";
@@ -35,12 +39,60 @@ import { integrationSettingsRoutes } from "./routes/integration-settings";
 import { modelPreferencesRoutes } from "./routes/model-preferences";
 import { reposRoutes } from "./routes/repos";
 import { mcpRoutes } from "./routes/mcp";
-import { secretsRoutes } from "./routes/secrets";
 import { contextRoutes } from "./routes/context";
 import { userPreferencesRoutes } from "./routes/user-preferences";
 import { sessionFoldersRoutes } from "./routes/session-folders";
+import { repoImageRoutes } from "./routes/repo-images";
+import { secretsRoutes } from "./routes/secrets";
+import { automationRoutes } from "./routes/automations";
 
 const logger = createLogger("router");
+
+// Guardrail constants for agent-spawned child sessions
+const MAX_SPAWN_DEPTH = 2;
+const MAX_CONCURRENT_CHILDREN = 5;
+const MAX_TOTAL_CHILDREN = 15;
+
+/**
+ * Resolve whether code-server should be enabled for a given repo,
+ * checking both the `enabled` setting and the `enabledRepos` allowlist.
+ */
+async function resolveCodeServerEnabled(
+  db: D1Database | undefined,
+  repoOwner: string,
+  repoName: string
+): Promise<boolean> {
+  if (!db) return false;
+  const repo = `${repoOwner}/${repoName}`;
+  try {
+    const store = new IntegrationSettingsStore(db);
+    const { enabledRepos, settings } = await store.getResolvedConfig("code-server", repo);
+    const csSettings = settings as CodeServerSettings;
+    if (csSettings.enabled !== true) return false;
+    // enabledRepos: null → all repos, [] → none, [...] → allowlist
+    if (enabledRepos !== null && !enabledRepos.includes(repo)) return false;
+    return true;
+  } catch (e) {
+    logger.warn("Failed to resolve code-server integration settings, defaulting to disabled", {
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return false;
+  }
+}
+
+const SESSION_STATUSES: SessionStatus[] = [
+  "created",
+  "active",
+  "completed",
+  "failed",
+  "archived",
+  "cancelled",
+];
+
+function parseSessionStatus(value: string | null): SessionStatus | undefined {
+  if (!value) return undefined;
+  return SESSION_STATUSES.includes(value as SessionStatus) ? (value as SessionStatus) : undefined;
+}
 
 /**
  * Create a Request to a Durable Object stub with correlation headers.
@@ -91,6 +143,9 @@ const SANDBOX_AUTH_ROUTES: RegExp[] = [
   /^\/sessions\/[^/]+\/pr$/, // PR creation from sandbox
   /^\/sessions\/[^/]+\/openai-token-refresh$/, // OpenAI token refresh from sandbox
   /^\/sessions\/[^/]+\/artifacts\/upload$/, // Artifact uploads from sandbox
+  /^\/sessions\/[^/]+\/children$/, // POST spawn, GET list
+  /^\/sessions\/[^/]+\/children\/[^/]+$/, // GET child detail
+  /^\/sessions\/[^/]+\/children\/[^/]+\/cancel$/, // POST cancel child
 ];
 const MAX_RECORDING_UPLOAD_BYTES = 100 * 1024 * 1024; // 100 MB
 const MAX_ARTIFACT_METADATA_HEADER_BYTES = 4096; // 4 KB
@@ -219,7 +274,7 @@ async function verifySandboxAuth(
 
   const verifyResponse = await stub.fetch(
     internalRequest(
-      "http://internal/internal/verify-sandbox-token",
+      buildSessionInternalUrl(SessionInternalPaths.verifySandboxToken),
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -393,6 +448,11 @@ const routes: Route[] = [
     handler: handleSessionWsToken,
   },
   {
+    method: "PATCH",
+    pattern: parsePattern("/sessions/:id/title"),
+    handler: handleUpdateSessionTitle,
+  },
+  {
     method: "POST",
     pattern: parsePattern("/sessions/:id/archive"),
     handler: handleArchiveSession,
@@ -401,6 +461,28 @@ const routes: Route[] = [
     method: "POST",
     pattern: parsePattern("/sessions/:id/unarchive"),
     handler: handleUnarchiveSession,
+  },
+
+  // Child session management (sandbox-authenticated)
+  {
+    method: "POST",
+    pattern: parsePattern("/sessions/:id/children"),
+    handler: handleSpawnChild,
+  },
+  {
+    method: "GET",
+    pattern: parsePattern("/sessions/:id/children"),
+    handler: handleListChildren,
+  },
+  {
+    method: "GET",
+    pattern: parsePattern("/sessions/:id/children/:childId"),
+    handler: handleGetChild,
+  },
+  {
+    method: "POST",
+    pattern: parsePattern("/sessions/:id/children/:childId/cancel"),
+    handler: handleCancelChild,
   },
 
   // Repository management
@@ -426,6 +508,12 @@ const routes: Route[] = [
 
   // Session folder preferences
   ...sessionFoldersRoutes,
+
+  // Repo image builds
+  ...repoImageRoutes,
+
+  // Automations
+  ...automationRoutes,
 ];
 
 /**
@@ -558,8 +646,18 @@ async function handleListSessions(
   const url = new URL(request.url);
   const limit = Math.min(parseInt(url.searchParams.get("limit") || "50"), 100);
   const offset = parseInt(url.searchParams.get("offset") || "0");
-  const status = url.searchParams.get("status") || undefined;
-  const excludeStatus = url.searchParams.get("excludeStatus") || undefined;
+  const statusParam = url.searchParams.get("status");
+  const excludeStatusParam = url.searchParams.get("excludeStatus");
+  const status = parseSessionStatus(statusParam);
+  const excludeStatus = parseSessionStatus(excludeStatusParam);
+
+  if (statusParam && !status) {
+    return error("Invalid status", 400);
+  }
+
+  if (excludeStatusParam && !excludeStatus) {
+    return error("Invalid excludeStatus", 400);
+  }
 
   const store = new SessionIndexStore(env.DB);
   const result = await store.list({ status, excludeStatus, limit, offset });
@@ -579,6 +677,9 @@ async function handleCreateSession(
 ): Promise<Response> {
   const body = (await request.json()) as CreateSessionRequest & {
     scmToken?: string;
+    scmRefreshToken?: string;
+    scmTokenExpiresAt?: number;
+    scmUserId?: string;
     userId?: string;
     scmLogin?: string;
     scmName?: string;
@@ -589,11 +690,17 @@ async function handleCreateSession(
     return error("repoOwner and repoName are required");
   }
 
+  // Validate branch name if provided (defense in depth)
+  if (body.branch && !/^[\w.\-/]+$/.test(body.branch)) {
+    return error("Invalid branch name");
+  }
+
   // Normalize repo identifiers to lowercase for consistent storage
   const repoOwner = body.repoOwner.toLowerCase();
   const repoName = body.repoName.toLowerCase();
 
   let repoId: number;
+  let defaultBranch: string;
   try {
     const provider = createRouteSourceControlProvider(env);
     const resolved = await resolveInstalledRepo(provider, repoOwner, repoName);
@@ -601,6 +708,7 @@ async function handleCreateSession(
       return error("Repository is not installed for the GitHub App", 404);
     }
     repoId = resolved.repoId;
+    defaultBranch = resolved.defaultBranch;
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     logger.error("Failed to resolve repository", {
@@ -618,7 +726,11 @@ async function handleCreateSession(
   const scmName = body.scmName;
   const scmEmail = body.scmEmail;
   const scmToken = body.scmToken;
+  const scmRefreshToken = body.scmRefreshToken;
+  const scmTokenExpiresAt = body.scmTokenExpiresAt;
+  const scmUserId = body.scmUserId;
   let scmTokenEncrypted: string | null = null;
+  let scmRefreshTokenEncrypted: string | null = null;
 
   // If SCM token provided, encrypt it
   if (scmToken && env.TOKEN_ENCRYPTION_KEY) {
@@ -629,6 +741,16 @@ async function handleCreateSession(
         error: e instanceof Error ? e : String(e),
       });
       return error("Failed to process SCM token", 500);
+    }
+  }
+
+  if (scmRefreshToken && env.TOKEN_ENCRYPTION_KEY) {
+    try {
+      scmRefreshTokenEncrypted = await encryptToken(scmRefreshToken, env.TOKEN_ENCRYPTION_KEY);
+    } catch (e) {
+      logger.warn("Session created without refresh token — token refresh will be unavailable", {
+        error: e instanceof Error ? e : String(e),
+      });
     }
   }
 
@@ -646,10 +768,13 @@ async function handleCreateSession(
       ? body.reasoningEffort
       : null;
 
+  // Resolve code-server integration setting for this repo
+  const codeServerEnabled = await resolveCodeServerEnabled(env.DB, repoOwner, repoName);
+
   // Initialize session with user info and optional encrypted token
   const initResponse = await stub.fetch(
     internalRequest(
-      "http://internal/internal/init",
+      buildSessionInternalUrl(SessionInternalPaths.init),
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -658,6 +783,8 @@ async function handleCreateSession(
           repoOwner,
           repoName,
           repoId,
+          defaultBranch,
+          branch: body.branch,
           title: body.title,
           model,
           reasoningEffort,
@@ -666,6 +793,10 @@ async function handleCreateSession(
           scmName,
           scmEmail,
           scmTokenEncrypted,
+          scmRefreshTokenEncrypted,
+          scmTokenExpiresAt,
+          scmUserId,
+          codeServerEnabled,
         }),
       },
       ctx
@@ -674,6 +805,24 @@ async function handleCreateSession(
 
   if (!initResponse.ok) {
     return error("Failed to create session", 500);
+  }
+
+  // Populate D1 with the user's SCM tokens (non-blocking) so centralized refresh works
+  if (scmUserId && scmToken && scmRefreshToken && env.TOKEN_ENCRYPTION_KEY) {
+    ctx.executionCtx?.waitUntil(
+      new UserScmTokenStore(env.DB, env.TOKEN_ENCRYPTION_KEY)
+        .upsertTokens(
+          scmUserId,
+          scmToken,
+          scmRefreshToken,
+          scmTokenExpiresAt ?? Date.now() + DEFAULT_TOKEN_LIFETIME_MS
+        )
+        .catch((e) =>
+          logger.error("Failed to write tokens to D1", {
+            error: e instanceof Error ? e : String(e),
+          })
+        )
+    );
   }
 
   // Store session in D1 index for listing
@@ -686,6 +835,7 @@ async function handleCreateSession(
     repoName,
     model,
     reasoningEffort,
+    baseBranch: body.branch || defaultBranch || "main",
     status: "created",
     createdAt: now,
     updatedAt: now,
@@ -712,62 +862,12 @@ async function handleGetSession(
   const stub = env.SESSION.get(doId);
 
   const response = await stub.fetch(
-    internalRequest("http://internal/internal/state", undefined, ctx)
+    internalRequest(buildSessionInternalUrl(SessionInternalPaths.state), undefined, ctx)
   );
 
   if (!response.ok) {
     return error("Session not found", 404);
   }
-
-  return response;
-}
-
-async function handleUpdateSessionTitle(
-  request: Request,
-  env: Env,
-  match: RegExpMatchArray,
-  ctx: RequestContext
-): Promise<Response> {
-  const sessionId = match.groups?.id;
-  if (!sessionId) return error("Session ID required");
-
-  let body: { userId?: string; title?: string };
-  try {
-    body = (await request.json()) as { userId?: string; title?: string };
-  } catch {
-    return error("Invalid request body");
-  }
-
-  if (!body.userId) {
-    return error("userId is required");
-  }
-
-  if (typeof body.title !== "string") {
-    return error("title must be a string");
-  }
-
-  const normalizedTitle = trimSessionTitle(body.title);
-  if (normalizedTitle.length === 0) {
-    return error("title must not be empty");
-  }
-
-  if (normalizedTitle.length > MAX_SESSION_TITLE_LENGTH) {
-    return error(`title must be <= ${MAX_SESSION_TITLE_LENGTH} characters`);
-  }
-
-  const doId = env.SESSION.idFromName(sessionId);
-  const stub = env.SESSION.get(doId);
-  const response = await stub.fetch(
-    internalRequest(
-      "http://internal/internal/update-title",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: body.userId, title: normalizedTitle }),
-      },
-      ctx
-    )
-  );
 
   return response;
 }
@@ -820,7 +920,7 @@ async function handleSessionPrompt(
 
   const response = await stub.fetch(
     internalRequest(
-      "http://internal/internal/prompt",
+      buildSessionInternalUrl(SessionInternalPaths.prompt),
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -841,7 +941,16 @@ async function handleSessionPrompt(
 
   // Background: update D1 timestamp so session bubbles to top of sidebar
   const store = new SessionIndexStore(env.DB);
-  ctx.executionCtx?.waitUntil(store.touchUpdatedAt(sessionId).catch(() => {}));
+  ctx.executionCtx?.waitUntil(
+    store.touchUpdatedAt(sessionId).catch((error) => {
+      logger.error("session_index.touch_updated_at.background_error", {
+        session_id: sessionId,
+        trace_id: ctx.trace_id,
+        request_id: ctx.request_id,
+        error,
+      });
+    })
+  );
 
   return response;
 }
@@ -855,7 +964,9 @@ async function handleSessionStop(
   const stub = getSessionStub(env, match);
   if (!stub) return error("Session ID required");
 
-  return stub.fetch(internalRequest("http://internal/internal/stop", { method: "POST" }, ctx));
+  return stub.fetch(
+    internalRequest(buildSessionInternalUrl(SessionInternalPaths.stop), { method: "POST" }, ctx)
+  );
 }
 
 async function handleSessionEvents(
@@ -869,7 +980,11 @@ async function handleSessionEvents(
 
   const url = new URL(request.url);
   return stub.fetch(
-    internalRequest(`http://internal/internal/events${url.search}`, undefined, ctx)
+    internalRequest(
+      buildSessionInternalUrl(SessionInternalPaths.events, url.search),
+      undefined,
+      ctx
+    )
   );
 }
 
@@ -882,7 +997,9 @@ async function handleSessionArtifacts(
   const stub = getSessionStub(env, match);
   if (!stub) return error("Session ID required");
 
-  return stub.fetch(internalRequest("http://internal/internal/artifacts", undefined, ctx));
+  return stub.fetch(
+    internalRequest(buildSessionInternalUrl(SessionInternalPaths.artifacts), undefined, ctx)
+  );
 }
 
 async function handleSessionArtifactUpload(
@@ -979,7 +1096,9 @@ async function handleSessionParticipants(
   const stub = getSessionStub(env, match);
   if (!stub) return error("Session ID required");
 
-  return stub.fetch(internalRequest("http://internal/internal/participants", undefined, ctx));
+  return stub.fetch(
+    internalRequest(buildSessionInternalUrl(SessionInternalPaths.participants), undefined, ctx)
+  );
 }
 
 async function handleAddParticipant(
@@ -998,7 +1117,7 @@ async function handleAddParticipant(
 
   const response = await stub.fetch(
     internalRequest(
-      "http://internal/internal/participants",
+      buildSessionInternalUrl(SessionInternalPaths.participants),
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1022,7 +1141,11 @@ async function handleSessionMessages(
 
   const url = new URL(request.url);
   return stub.fetch(
-    internalRequest(`http://internal/internal/messages${url.search}`, undefined, ctx)
+    internalRequest(
+      buildSessionInternalUrl(SessionInternalPaths.messages, url.search),
+      undefined,
+      ctx
+    )
   );
 }
 
@@ -1064,7 +1187,7 @@ async function handleCreatePR(
 
   const response = await stub.fetch(
     internalRequest(
-      "http://internal/internal/create-pr",
+      buildSessionInternalUrl(SessionInternalPaths.createPr),
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1092,7 +1215,11 @@ async function handleOpenAITokenRefresh(
   if (!stub) return error("Session ID required");
 
   return stub.fetch(
-    internalRequest("http://internal/internal/openai-token-refresh", { method: "POST" }, ctx)
+    internalRequest(
+      buildSessionInternalUrl(SessionInternalPaths.openaiTokenRefresh),
+      { method: "POST" },
+      ctx
+    )
   );
 }
 
@@ -1183,7 +1310,7 @@ async function handleSessionWsToken(
   const response = await ctx.metrics.time("do_fetch", () =>
     stub.fetch(
       internalRequest(
-        "http://internal/internal/ws-token",
+        buildSessionInternalUrl(SessionInternalPaths.wsToken),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1202,6 +1329,56 @@ async function handleSessionWsToken(
       )
     )
   );
+
+  return response;
+}
+
+async function handleUpdateSessionTitle(
+  request: Request,
+  env: Env,
+  match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  const sessionId = match.groups?.id;
+  if (!sessionId) return error("Session ID required");
+
+  let userId: string | undefined;
+  let title: string | undefined;
+
+  try {
+    const body = (await request.json()) as { userId?: string; title?: string };
+    userId = body.userId;
+    title = body.title;
+  } catch (_error) {
+    // Body parsing failed, continue without userId/title
+    userId = undefined;
+    title = undefined;
+  }
+
+  const doId = env.SESSION.idFromName(sessionId);
+  const stub = env.SESSION.get(doId);
+
+  const response = await stub.fetch(
+    internalRequest(
+      buildSessionInternalUrl(SessionInternalPaths.updateTitle),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, title }),
+      },
+      ctx
+    )
+  );
+
+  if (response.ok) {
+    // read the validated title from the DO response
+    const doResult = (await response.clone().json()) as { title: string };
+    const sessionStore = new SessionIndexStore(env.DB);
+    const updated = await sessionStore.updateTitle(sessionId, doResult.title);
+    if (!updated) {
+      logger.warn("Session not found in D1 index during title update", { session_id: sessionId });
+    }
+  }
 
   return response;
 }
@@ -1229,7 +1406,7 @@ async function handleArchiveSession(
 
   const response = await stub.fetch(
     internalRequest(
-      "http://internal/internal/archive",
+      buildSessionInternalUrl(SessionInternalPaths.archive),
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1274,7 +1451,7 @@ async function handleUnarchiveSession(
 
   const response = await stub.fetch(
     internalRequest(
-      "http://internal/internal/unarchive",
+      buildSessionInternalUrl(SessionInternalPaths.unarchive),
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1291,6 +1468,293 @@ async function handleUnarchiveSession(
     if (!updated) {
       logger.warn("Session not found in D1 index during unarchive", { session_id: sessionId });
     }
+  }
+
+  return response;
+}
+
+// Child session handlers
+
+async function handleSpawnChild(
+  request: Request,
+  env: Env,
+  match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  const parentId = match.groups?.id;
+  if (!parentId) return error("Parent session ID required");
+
+  const body = (await request.json()) as SpawnChildSessionRequest;
+
+  if (!body.title || !body.prompt) {
+    return error("title and prompt are required");
+  }
+
+  const sessionStore = new SessionIndexStore(env.DB);
+
+  // Guardrail: depth
+  const parentDepth = await sessionStore.getSpawnDepth(parentId);
+  if (parentDepth >= MAX_SPAWN_DEPTH) {
+    return error(`Maximum spawn depth (${MAX_SPAWN_DEPTH}) exceeded`, 403);
+  }
+
+  // Guardrail: concurrent children
+  const activeCount = await sessionStore.countActiveChildren(parentId);
+  if (activeCount >= MAX_CONCURRENT_CHILDREN) {
+    return error(`Maximum concurrent children (${MAX_CONCURRENT_CHILDREN}) reached`, 429);
+  }
+
+  // Guardrail: total children
+  const totalCount = await sessionStore.countTotalChildren(parentId);
+  if (totalCount >= MAX_TOTAL_CHILDREN) {
+    return error(`Maximum total children (${MAX_TOTAL_CHILDREN}) reached`, 429);
+  }
+
+  // Get parent context from parent DO
+  const parentDoId = env.SESSION.idFromName(parentId);
+  const parentStub = env.SESSION.get(parentDoId);
+
+  const spawnContextRes = await parentStub.fetch(
+    internalRequest(buildSessionInternalUrl(SessionInternalPaths.spawnContext), undefined, ctx)
+  );
+
+  if (!spawnContextRes.ok) {
+    return error("Failed to get parent session context", 500);
+  }
+
+  const spawnContext = (await spawnContextRes.json()) as SpawnContext;
+
+  // Guardrail: same-repo — reject if either field doesn't match parent
+  if (
+    (body.repoOwner && body.repoOwner.toLowerCase() !== spawnContext.repoOwner.toLowerCase()) ||
+    (body.repoName && body.repoName.toLowerCase() !== spawnContext.repoName.toLowerCase())
+  ) {
+    return error("Child sessions must use the same repository as the parent", 403);
+  }
+
+  // Create child session (same pattern as handleCreateSession)
+  const childId = generateId();
+  const childDoId = env.SESSION.idFromName(childId);
+  const childStub = env.SESSION.get(childDoId);
+
+  const model = getValidModelOrDefault(body.model || spawnContext.model);
+  const reasoningEffort =
+    body.reasoningEffort && isValidReasoningEffort(model, body.reasoningEffort)
+      ? body.reasoningEffort
+      : spawnContext.reasoningEffort;
+
+  const childDepth = parentDepth + 1;
+
+  logger.info("Spawning child session", {
+    event: "session.spawn_child",
+    parent_id: parentId,
+    child_id: childId,
+    child_depth: childDepth,
+    model,
+  });
+
+  // Resolve code-server integration setting for child (same repo as parent)
+  const childCodeServerEnabled = await resolveCodeServerEnabled(
+    env.DB,
+    spawnContext.repoOwner,
+    spawnContext.repoName
+  );
+
+  // Initialize child DO
+  const initResponse = await childStub.fetch(
+    internalRequest(
+      buildSessionInternalUrl(SessionInternalPaths.init),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionName: childId,
+          repoOwner: spawnContext.repoOwner,
+          repoName: spawnContext.repoName,
+          repoId: spawnContext.repoId,
+          title: body.title,
+          model,
+          reasoningEffort,
+          userId: spawnContext.owner.userId,
+          scmLogin: spawnContext.owner.scmLogin,
+          scmName: spawnContext.owner.scmName,
+          scmEmail: spawnContext.owner.scmEmail,
+          scmTokenEncrypted: spawnContext.owner.scmAccessTokenEncrypted,
+          scmRefreshTokenEncrypted: spawnContext.owner.scmRefreshTokenEncrypted,
+          scmTokenExpiresAt: spawnContext.owner.scmTokenExpiresAt,
+          scmUserId: spawnContext.owner.scmUserId,
+          branch: spawnContext.baseBranch ?? "main",
+          parentSessionId: parentId,
+          spawnSource: "agent",
+          spawnDepth: childDepth,
+          codeServerEnabled: childCodeServerEnabled,
+        }),
+      },
+      ctx
+    )
+  );
+
+  if (!initResponse.ok) {
+    return error("Failed to create child session", 500);
+  }
+
+  // Store in D1 index
+  const now = Date.now();
+  await sessionStore.create({
+    id: childId,
+    title: body.title,
+    repoOwner: spawnContext.repoOwner,
+    repoName: spawnContext.repoName,
+    model,
+    reasoningEffort,
+    baseBranch: spawnContext.baseBranch ?? "main",
+    status: "created",
+    parentSessionId: parentId,
+    spawnSource: "agent",
+    spawnDepth: childDepth,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  // Enqueue the prompt on the child DO
+  let promptResponse: Response;
+  try {
+    promptResponse = await childStub.fetch(
+      internalRequest(
+        buildSessionInternalUrl(SessionInternalPaths.prompt),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content: body.prompt,
+            authorId: spawnContext.owner.userId,
+            source: "agent",
+          }),
+        },
+        ctx
+      )
+    );
+  } catch (enqueueError) {
+    logger.error("Failed to enqueue initial prompt for child session", {
+      event: "session.spawn_child_prompt_enqueue_failed",
+      parent_id: parentId,
+      child_id: childId,
+      trace_id: ctx.trace_id,
+      request_id: ctx.request_id,
+      error: enqueueError instanceof Error ? enqueueError.message : String(enqueueError),
+    });
+    await sessionStore.updateStatus(childId, "failed");
+    return error("Failed to enqueue child session prompt", 500);
+  }
+
+  if (!promptResponse.ok) {
+    logger.error("Failed to enqueue initial prompt for child session", {
+      event: "session.spawn_child_prompt_enqueue_failed",
+      parent_id: parentId,
+      child_id: childId,
+      prompt_status: promptResponse.status,
+      trace_id: ctx.trace_id,
+      request_id: ctx.request_id,
+    });
+    await sessionStore.updateStatus(childId, "failed");
+    return error("Failed to enqueue child session prompt", 500);
+  }
+
+  // Notify parent session so connected clients can refresh child list
+  ctx.executionCtx?.waitUntil(
+    parentStub
+      .fetch(
+        internalRequest(
+          buildSessionInternalUrl(SessionInternalPaths.childSessionUpdate),
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              childSessionId: childId,
+              status: "created",
+              title: body.title,
+            }),
+          },
+          ctx
+        )
+      )
+      .catch((err) => {
+        logger.error("session.notify_parent_spawn.failed", { error: err });
+      })
+  );
+
+  return json({ sessionId: childId, status: "created" }, 201);
+}
+
+async function handleListChildren(
+  _request: Request,
+  env: Env,
+  match: RegExpMatchArray,
+  _ctx: RequestContext
+): Promise<Response> {
+  const parentId = match.groups?.id;
+  if (!parentId) return error("Parent session ID required");
+
+  const sessionStore = new SessionIndexStore(env.DB);
+  const children = await sessionStore.listByParent(parentId);
+
+  return json({ children });
+}
+
+async function handleGetChild(
+  _request: Request,
+  env: Env,
+  match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  const parentId = match.groups?.id;
+  const childId = match.groups?.childId;
+  if (!parentId || !childId) return error("Parent and child session IDs required");
+
+  const sessionStore = new SessionIndexStore(env.DB);
+  const isChild = await sessionStore.isChildOf(childId, parentId);
+  if (!isChild) {
+    return error("Child session not found", 404);
+  }
+
+  // Fetch child summary from child DO
+  const childDoId = env.SESSION.idFromName(childId);
+  const childStub = env.SESSION.get(childDoId);
+
+  const response = await childStub.fetch(
+    internalRequest(buildSessionInternalUrl(SessionInternalPaths.childSummary), undefined, ctx)
+  );
+
+  return response;
+}
+
+async function handleCancelChild(
+  _request: Request,
+  env: Env,
+  match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  const parentId = match.groups?.id;
+  const childId = match.groups?.childId;
+  if (!parentId || !childId) return error("Parent and child session IDs required");
+
+  const sessionStore = new SessionIndexStore(env.DB);
+  const isChild = await sessionStore.isChildOf(childId, parentId);
+  if (!isChild) {
+    return error("Child session not found", 404);
+  }
+
+  // Cancel via child DO
+  const childDoId = env.SESSION.idFromName(childId);
+  const childStub = env.SESSION.get(childDoId);
+
+  const response = await childStub.fetch(
+    internalRequest(buildSessionInternalUrl(SessionInternalPaths.cancel), { method: "POST" }, ctx)
+  );
+
+  // Update D1 status if cancel succeeded
+  if (response.ok) {
+    await sessionStore.updateStatus(childId, "cancelled");
   }
 
   return response;

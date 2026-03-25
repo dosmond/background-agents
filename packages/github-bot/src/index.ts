@@ -21,9 +21,22 @@ import {
   handleReviewRequested,
   handleIssueComment,
   handleReviewComment,
+  type HandlerResult,
 } from "./handlers";
 
 const app = new Hono<{ Bindings: Env }>();
+const DELIVERY_DEDUPE_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+const DELIVERY_PROCESSING_TTL_MS = 5 * 60 * 1_000;
+const DELIVERY_STATUS_PROCESSING = "processing";
+const DELIVERY_STATUS_PROCESSED = "processed";
+
+function getDeliveryDedupeKey(deliveryId: string): string {
+  return `delivery:${deliveryId}`;
+}
+
+function ttlSecondsFromMs(ttlMs: number): number {
+  return Math.ceil(ttlMs / 1_000);
+}
 
 app.get("/health", (c) => c.json({ status: "healthy", service: "open-inspect-github-bot" }));
 
@@ -41,6 +54,26 @@ app.post("/webhooks/github", async (c) => {
     return c.json({ error: "invalid signature" }, 401);
   }
 
+  let dedupeKey: string | null = null;
+  if (deliveryId) {
+    dedupeKey = getDeliveryDedupeKey(deliveryId);
+    const existing = await c.env.GITHUB_KV.get(dedupeKey);
+    if (existing) {
+      log.info("webhook.duplicate_delivery", {
+        delivery_id: deliveryId,
+        event_type: event,
+        dedupe_status: existing,
+      });
+      return c.json({ ok: true, duplicate: true });
+    }
+
+    await c.env.GITHUB_KV.put(dedupeKey, DELIVERY_STATUS_PROCESSING, {
+      expirationTtl: ttlSecondsFromMs(DELIVERY_PROCESSING_TTL_MS),
+    });
+  } else {
+    log.warn("webhook.delivery_id_missing", { event_type: event });
+  }
+
   const payload = JSON.parse(rawBody);
   const traceId = crypto.randomUUID();
 
@@ -55,13 +88,41 @@ app.post("/webhooks/github", async (c) => {
   });
 
   c.executionCtx.waitUntil(
-    handleWebhook(c.env, log, event, payload, traceId, deliveryId).catch((err) => {
-      log.error("webhook.processing_error", {
-        trace_id: traceId,
-        delivery_id: deliveryId,
-        error: err instanceof Error ? err : new Error(String(err)),
-      });
-    })
+    handleWebhook(c.env, log, event, payload, traceId, deliveryId)
+      .then(async () => {
+        if (!dedupeKey) return;
+
+        try {
+          await c.env.GITHUB_KV.put(dedupeKey, DELIVERY_STATUS_PROCESSED, {
+            expirationTtl: ttlSecondsFromMs(DELIVERY_DEDUPE_TTL_MS),
+          });
+        } catch (err) {
+          log.warn("webhook.dedupe_finalize_failed", {
+            trace_id: traceId,
+            delivery_id: deliveryId,
+            error: err instanceof Error ? err : new Error(String(err)),
+          });
+        }
+      })
+      .catch(async (err) => {
+        if (dedupeKey) {
+          try {
+            await c.env.GITHUB_KV.delete(dedupeKey);
+          } catch (deleteErr) {
+            log.warn("webhook.dedupe_clear_failed", {
+              trace_id: traceId,
+              delivery_id: deliveryId,
+              error: deleteErr instanceof Error ? deleteErr : new Error(String(deleteErr)),
+            });
+          }
+        }
+
+        log.error("webhook.processing_error", {
+          trace_id: traceId,
+          delivery_id: deliveryId,
+          error: err instanceof Error ? err : new Error(String(err)),
+        });
+      })
   );
 
   return c.json({ ok: true });
@@ -76,6 +137,62 @@ async function handleWebhook(
   deliveryId: string | undefined
 ): Promise<void> {
   const p = payload as Record<string, unknown>;
+  const repo = p.repository
+    ? `${(p.repository as Record<string, unknown> & { owner: { login: string }; name: string }).owner.login}/${(p.repository as Record<string, unknown> & { name: string }).name}`
+    : undefined;
+  const sender = (p.sender as { login?: string } | undefined)?.login;
+  const pullNumber =
+    (p.pull_request as { number?: number } | undefined)?.number ??
+    (p.issue as { number?: number } | undefined)?.number;
+
+  const wideEventBase = {
+    trace_id: traceId,
+    delivery_id: deliveryId,
+    event_type: event,
+    action: p.action,
+    repo,
+    pull_number: pullNumber,
+    sender,
+  };
+
+  const start = Date.now();
+  let result: HandlerResult;
+
+  try {
+    result = await dispatchHandler(env, log, event, p, payload, traceId);
+  } catch (err) {
+    log.info("webhook.handled", {
+      ...wideEventBase,
+      outcome: "error",
+      duration_ms: Date.now() - start,
+      error: err instanceof Error ? err : new Error(String(err)),
+    });
+    throw err;
+  }
+
+  const wideEvent: Record<string, unknown> = {
+    ...wideEventBase,
+    outcome: result.outcome,
+    duration_ms: Date.now() - start,
+  };
+  if (result.outcome === "skipped") {
+    wideEvent.skip_reason = result.skip_reason;
+  } else {
+    wideEvent.session_id = result.session_id;
+    wideEvent.message_id = result.message_id;
+    wideEvent.handler_action = result.handler_action;
+  }
+  log.info("webhook.handled", wideEvent);
+}
+
+function dispatchHandler(
+  env: Env,
+  log: Logger,
+  event: string | undefined,
+  p: Record<string, unknown>,
+  payload: unknown,
+  traceId: string
+): Promise<HandlerResult> {
   switch (event) {
     case "pull_request":
       if (p.action === "opened") {
@@ -84,24 +201,32 @@ async function handleWebhook(
       if (p.action === "review_requested") {
         return handleReviewRequested(env, log, payload as ReviewRequestedPayload, traceId);
       }
-      break;
+      return Promise.resolve({
+        outcome: "skipped",
+        skip_reason: "unsupported_action",
+      });
     case "issue_comment":
       if (p.action === "created") {
         return handleIssueComment(env, log, payload as IssueCommentPayload, traceId);
       }
-      break;
+      return Promise.resolve({
+        outcome: "skipped",
+        skip_reason: "unsupported_action",
+      });
     case "pull_request_review_comment":
       if (p.action === "created") {
         return handleReviewComment(env, log, payload as ReviewCommentPayload, traceId);
       }
-      break;
+      return Promise.resolve({
+        outcome: "skipped",
+        skip_reason: "unsupported_action",
+      });
+    default:
+      return Promise.resolve({
+        outcome: "skipped",
+        skip_reason: "unsupported_event",
+      });
   }
-  log.debug("webhook.ignored", {
-    event_type: event,
-    action: p?.action,
-    trace_id: traceId,
-    delivery_id: deliveryId,
-  });
 }
 
 export default app;

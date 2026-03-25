@@ -25,6 +25,7 @@ vi.mock("../auth/github", () => ({
 }));
 
 import { refreshAccessToken } from "../auth/github";
+import { decryptToken } from "../auth/crypto";
 
 // ---- Mock factories ----
 
@@ -586,7 +587,7 @@ describe("ParticipantService", () => {
       );
     });
 
-    it("returns error when token expired and no refresh token", async () => {
+    it("returns auth: null when token expired and refresh fails (falls back to app token)", async () => {
       const participant = createParticipant({
         scm_access_token_encrypted: "enc:encrypted-access",
         scm_refresh_token_encrypted: null,
@@ -595,7 +596,29 @@ describe("ParticipantService", () => {
 
       const result = await harness.service.resolveAuthForPR(participant);
 
-      expect(result).toEqual(expect.objectContaining({ error: expect.any(String), status: 401 }));
+      expect(result).toEqual({ auth: null });
+      expect(harness.log.warn).toHaveBeenCalledWith(
+        "SCM token expired and refresh failed, falling back to app token",
+        expect.any(Object)
+      );
+    });
+
+    it("returns auth: null when token decryption fails (falls back to app token)", async () => {
+      const participant = createParticipant({
+        scm_access_token_encrypted: "enc:encrypted-access",
+        scm_refresh_token_encrypted: null,
+        scm_token_expires_at: null, // not expired — goes straight to decrypt
+      });
+
+      vi.mocked(decryptToken).mockRejectedValueOnce(new Error("bad key"));
+
+      const result = await harness.service.resolveAuthForPR(participant);
+
+      expect(result).toEqual({ auth: null });
+      expect(harness.log.error).toHaveBeenCalledWith(
+        "Failed to decrypt SCM token for PR creation, falling back to app token",
+        expect.any(Object)
+      );
     });
   });
 });

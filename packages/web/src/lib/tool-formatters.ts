@@ -1,26 +1,6 @@
-export interface SandboxEvent {
-  type: string;
-  content?: string;
-  messageId?: string;
-  tool?: string;
-  args?: Record<string, unknown>;
-  callId?: string;
-  result?: string;
-  error?: string;
-  success?: boolean;
-  status?: string;
-  output?: string;
-  sha?: string;
-  artifactType?: string;
-  url?: string;
-  metadata?: Record<string, unknown>;
-  author?: {
-    participantId: string;
-    name: string;
-    avatar?: string;
-  };
-  timestamp: number;
-}
+import type { SandboxEvent } from "@/types/session";
+
+type ToolCallEvent = Extract<SandboxEvent, { type: "tool_call" }>;
 
 /**
  * Extract just the filename from a file path
@@ -48,6 +28,100 @@ function countLines(str: string | undefined): number {
   return str.split("\n").length;
 }
 
+type PatchOperation = "add" | "update" | "delete";
+
+interface PatchSummary {
+  addCount: number;
+  updateCount: number;
+  deleteCount: number;
+  totalFiles: number;
+  firstFile: string | null;
+  firstOperation: PatchOperation | null;
+}
+
+function getStringArg(
+  args: Record<string, unknown> | undefined,
+  ...keys: string[]
+): string | undefined {
+  for (const key of keys) {
+    const value = args?.[key];
+    if (typeof value === "string") return value;
+  }
+  return undefined;
+}
+
+function getArrayArg(
+  args: Record<string, unknown> | undefined,
+  key: string
+): unknown[] | undefined {
+  const value = args?.[key];
+  return Array.isArray(value) ? value : undefined;
+}
+
+function summarizeApplyPatch(patchText: string | undefined): PatchSummary {
+  if (!patchText) {
+    return {
+      addCount: 0,
+      updateCount: 0,
+      deleteCount: 0,
+      totalFiles: 0,
+      firstFile: null,
+      firstOperation: null,
+    };
+  }
+
+  const summary: PatchSummary = {
+    addCount: 0,
+    updateCount: 0,
+    deleteCount: 0,
+    totalFiles: 0,
+    firstFile: null,
+    firstOperation: null,
+  };
+
+  for (const line of patchText.split("\n")) {
+    let operation: PatchOperation | null = null;
+    let filePath: string | undefined;
+
+    if (line.startsWith("*** Add File: ")) {
+      operation = "add";
+      filePath = line.slice("*** Add File: ".length);
+      summary.addCount += 1;
+    } else if (line.startsWith("*** Update File: ")) {
+      operation = "update";
+      filePath = line.slice("*** Update File: ".length);
+      summary.updateCount += 1;
+    } else if (line.startsWith("*** Delete File: ")) {
+      operation = "delete";
+      filePath = line.slice("*** Delete File: ".length);
+      summary.deleteCount += 1;
+    }
+
+    if (!operation) continue;
+
+    summary.totalFiles += 1;
+    if (!summary.firstFile) {
+      summary.firstFile = basename(filePath);
+      summary.firstOperation = operation;
+    }
+  }
+
+  return summary;
+}
+
+function operationLabel(operation: PatchOperation | null): string {
+  switch (operation) {
+    case "add":
+      return "Add";
+    case "update":
+      return "Update";
+    case "delete":
+      return "Delete";
+    default:
+      return "Patch";
+  }
+}
+
 export interface FormattedToolCall {
   /** Tool name for display */
   toolName: string;
@@ -65,14 +139,14 @@ export interface FormattedToolCall {
  * Tool names are normalized to lowercase for matching since OpenCode may
  * report them in different cases (e.g., "todowrite" vs "TodoWrite")
  */
-export function formatToolCall(event: SandboxEvent): FormattedToolCall {
+export function formatToolCall(event: ToolCallEvent): FormattedToolCall {
   const { tool, args, output } = event;
   const normalizedTool = tool?.toLowerCase() || "unknown";
 
   switch (normalizedTool) {
     case "read": {
       // OpenCode uses filePath (camelCase)
-      const filePath = (args?.filePath ?? args?.file_path) as string | undefined;
+      const filePath = getStringArg(args, "filePath", "file_path");
       const lineCount = countLines(output);
       return {
         toolName: "Read",
@@ -85,7 +159,7 @@ export function formatToolCall(event: SandboxEvent): FormattedToolCall {
     }
 
     case "edit": {
-      const filePath = (args?.filePath ?? args?.file_path) as string | undefined;
+      const filePath = getStringArg(args, "filePath", "file_path");
       return {
         toolName: "Edit",
         summary: filePath ? basename(filePath) : "file",
@@ -95,7 +169,7 @@ export function formatToolCall(event: SandboxEvent): FormattedToolCall {
     }
 
     case "write": {
-      const filePath = (args?.filePath ?? args?.file_path) as string | undefined;
+      const filePath = getStringArg(args, "filePath", "file_path");
       return {
         toolName: "Write",
         summary: filePath ? basename(filePath) : "file",
@@ -105,7 +179,7 @@ export function formatToolCall(event: SandboxEvent): FormattedToolCall {
     }
 
     case "bash": {
-      const command = args?.command as string | undefined;
+      const command = getStringArg(args, "command");
       return {
         toolName: "Bash",
         summary: truncate(command, 50),
@@ -115,7 +189,7 @@ export function formatToolCall(event: SandboxEvent): FormattedToolCall {
     }
 
     case "grep": {
-      const pattern = args?.pattern as string | undefined;
+      const pattern = getStringArg(args, "pattern");
       const matchCount = output ? countLines(output) : 0;
       return {
         toolName: "Grep",
@@ -128,7 +202,7 @@ export function formatToolCall(event: SandboxEvent): FormattedToolCall {
     }
 
     case "glob": {
-      const pattern = args?.pattern as string | undefined;
+      const pattern = getStringArg(args, "pattern");
       const fileCount = output ? countLines(output) : 0;
       return {
         toolName: "Glob",
@@ -141,8 +215,8 @@ export function formatToolCall(event: SandboxEvent): FormattedToolCall {
     }
 
     case "task": {
-      const description = args?.description as string | undefined;
-      const prompt = args?.prompt as string | undefined;
+      const description = getStringArg(args, "description");
+      const prompt = getStringArg(args, "prompt");
       return {
         toolName: "Task",
         summary: description ? truncate(description, 40) : prompt ? truncate(prompt, 40) : "task",
@@ -152,7 +226,7 @@ export function formatToolCall(event: SandboxEvent): FormattedToolCall {
     }
 
     case "webfetch": {
-      const url = args?.url as string | undefined;
+      const url = getStringArg(args, "url");
       return {
         toolName: "WebFetch",
         summary: url ? truncate(url, 40) : "url",
@@ -162,7 +236,7 @@ export function formatToolCall(event: SandboxEvent): FormattedToolCall {
     }
 
     case "websearch": {
-      const query = args?.query as string | undefined;
+      const query = getStringArg(args, "query");
       return {
         toolName: "WebSearch",
         summary: query ? `"${truncate(query, 40)}"` : "search",
@@ -172,11 +246,34 @@ export function formatToolCall(event: SandboxEvent): FormattedToolCall {
     }
 
     case "todowrite": {
-      const todos = args?.todos as unknown[] | undefined;
+      const todos = getArrayArg(args, "todos");
       return {
         toolName: "TodoWrite",
         summary: todos ? `${todos.length} item${todos.length === 1 ? "" : "s"}` : "todos",
         icon: "file",
+        getDetails: () => ({ args, output }),
+      };
+    }
+
+    case "apply_patch": {
+      const patchText = getStringArg(args, "patchText");
+      const patchSummary = summarizeApplyPatch(patchText);
+
+      let summary = "patch";
+      if (patchSummary.totalFiles === 1 && patchSummary.firstFile) {
+        summary = `${operationLabel(patchSummary.firstOperation)} ${patchSummary.firstFile}`;
+      } else if (patchSummary.totalFiles > 1) {
+        const parts: string[] = [];
+        if (patchSummary.updateCount > 0) parts.push(`${patchSummary.updateCount} updated`);
+        if (patchSummary.addCount > 0) parts.push(`${patchSummary.addCount} added`);
+        if (patchSummary.deleteCount > 0) parts.push(`${patchSummary.deleteCount} deleted`);
+        summary = `${patchSummary.totalFiles} files${parts.length > 0 ? ` (${parts.join(", ")})` : ""}`;
+      }
+
+      return {
+        toolName: "Apply Patch",
+        summary,
+        icon: "pencil",
         getDetails: () => ({ args, output }),
       };
     }
@@ -194,7 +291,7 @@ export function formatToolCall(event: SandboxEvent): FormattedToolCall {
 /**
  * Get a compact summary for a group of tool calls
  */
-export function formatToolGroup(events: SandboxEvent[]): {
+export function formatToolGroup(events: ToolCallEvent[]): {
   toolName: string;
   count: number;
   summary: string;
@@ -231,6 +328,14 @@ export function formatToolGroup(events: SandboxEvent[]): {
         toolName: "Bash",
         count,
         summary: `${count} command${count === 1 ? "" : "s"}`,
+      };
+    }
+
+    case "apply_patch": {
+      return {
+        toolName: "Apply Patch",
+        count,
+        summary: `${count} patch${count === 1 ? "" : "es"}`,
       };
     }
 

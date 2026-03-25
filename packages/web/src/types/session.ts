@@ -1,3 +1,5 @@
+import type { SandboxEvent as SharedSandboxEvent } from "@open-inspect/shared";
+
 // Session-related type definitions
 
 export interface Artifact {
@@ -21,6 +23,8 @@ export interface Artifact {
   };
   createdAt: number;
 }
+
+export type SandboxEvent = SharedSandboxEvent;
 
 export interface Task {
   content: string;

@@ -7,7 +7,14 @@ import {
   getValidModelOrDefault,
   isValidModel,
 } from "../utils/models";
-import type { ClientInfo, Env, MessageSource, SandboxEvent, ServerMessage } from "../types";
+import type {
+  ClientInfo,
+  Env,
+  MessageSource,
+  SandboxEvent,
+  ServerMessage,
+  SessionStatus,
+} from "../types";
 import type { SourceControlProviderName } from "../source-control";
 import type { SessionRow, ParticipantRow, SandboxCommand } from "./types";
 import type { SessionRepository } from "./repository";
@@ -64,7 +71,13 @@ interface MessageQueueDeps {
   spawnSandbox: () => Promise<void>;
   broadcast: (message: ServerMessage) => void;
   ensureInitialTitle?: (promptContent: string) => Promise<void>;
+  setSessionStatus: (status: SessionStatus) => Promise<void>;
+  reconcileSessionStatusAfterExecution: (success: boolean) => Promise<void>;
   scheduleExecutionTimeout?: (startedAtMs: number) => Promise<void>;
+}
+
+interface StopExecutionOptions {
+  suppressStatusReconcile?: boolean;
 }
 
 export class SessionMessageQueue {
@@ -160,6 +173,7 @@ export class SessionMessageQueue {
     if (this.deps.ensureInitialTitle) {
       await this.deps.ensureInitialTitle(data.content);
     }
+    await this.deps.setSessionStatus("active");
 
     this.writeUserMessageEvent(participant, data.content, messageId, now);
 
@@ -181,9 +195,17 @@ export class SessionMessageQueue {
 
     if (this.deps.env.DB) {
       const store = new SessionIndexStore(this.deps.env.DB);
-      const sessionId = this.deps.getSession()?.id;
+      const session = this.deps.getSession();
+      const sessionId = session?.session_name || session?.id;
       if (sessionId) {
-        this.deps.ctx.waitUntil(store.touchUpdatedAt(sessionId).catch(() => {}));
+        this.deps.ctx.waitUntil(
+          store.touchUpdatedAt(sessionId).catch((error) => {
+            this.deps.log.error("session_index.touch_updated_at.background_error", {
+              session_id: sessionId,
+              error,
+            });
+          })
+        );
       }
     }
 
@@ -308,7 +330,7 @@ export class SessionMessageQueue {
     });
   }
 
-  async stopExecution(): Promise<void> {
+  async stopExecution(options: StopExecutionOptions = {}): Promise<void> {
     const now = Date.now();
     const processingMessage = this.deps.repository.getProcessingMessage();
 
@@ -340,6 +362,10 @@ export class SessionMessageQueue {
       this.deps.ctx.waitUntil(
         this.deps.callbackService.notifyComplete(processingMessage.id, false)
       );
+
+      if (!options.suppressStatusReconcile) {
+        await this.deps.reconcileSessionStatusAfterExecution(false);
+      }
     }
 
     this.deps.broadcast({ type: "processing_status", isProcessing: false });
@@ -375,6 +401,7 @@ export class SessionMessageQueue {
     this.deps.broadcast({ type: "sandbox_event", event: syntheticEvent });
     this.deps.broadcast({ type: "processing_status", isProcessing: false });
     this.deps.ctx.waitUntil(this.deps.callbackService.notifyComplete(processingMessage.id, false));
+    await this.deps.reconcileSessionStatusAfterExecution(false);
   }
 
   writeUserMessageEvent(
@@ -456,6 +483,7 @@ export class SessionMessageQueue {
     if (this.deps.ensureInitialTitle) {
       await this.deps.ensureInitialTitle(data.content);
     }
+    await this.deps.setSessionStatus("active");
 
     this.writeUserMessageEvent(participant, data.content, messageId, now);
 

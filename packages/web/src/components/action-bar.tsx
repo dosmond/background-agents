@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { toast } from "sonner";
 import type { Artifact } from "@/types/session";
 import {
   GlobeIcon,
@@ -10,7 +11,24 @@ import {
   LinkIcon,
   GitHubIcon,
 } from "@/components/ui/icons";
-import { buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { getSafeExternalUrl } from "@/lib/urls";
 
 interface ActionBarProps {
   sessionId: string;
@@ -27,29 +45,35 @@ export function ActionBar({
   onArchive,
   onUnarchive,
 }: ActionBarProps) {
-  const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isArchiving, setIsArchiving] = useState(false);
+  const [showArchiveDialog, setShowArchiveDialog] = useState(false);
 
   const prArtifact = artifacts.find((a) => a.type === "pr");
   const previewArtifact = artifacts.find((a) => a.type === "preview");
+  const previewUrl = getSafeExternalUrl(previewArtifact?.url);
+  const prUrl = getSafeExternalUrl(prArtifact?.url);
 
   const isArchived = sessionStatus === "archived";
 
   const handleArchiveToggle = async () => {
     if (!isArchived) {
-      const confirmed = window.confirm(
-        "Archive this session? You can restore archived sessions from Settings > Data Controls."
-      );
-      if (!confirmed) return;
+      setShowArchiveDialog(true);
+      return;
     }
 
     setIsArchiving(true);
     try {
-      if (isArchived && onUnarchive) {
-        await onUnarchive();
-      } else if (!isArchived && onArchive) {
-        await onArchive();
-      }
+      if (onUnarchive) await onUnarchive();
+    } finally {
+      setIsArchiving(false);
+    }
+  };
+
+  const handleConfirmArchive = async () => {
+    setShowArchiveDialog(false);
+    setIsArchiving(true);
+    try {
+      if (onArchive) await onArchive();
     } finally {
       setIsArchiving(false);
     }
@@ -58,92 +82,86 @@ export function ActionBar({
   const handleCopyLink = async () => {
     const url = `${window.location.origin}/session/${sessionId}`;
     await navigator.clipboard.writeText(url);
-    setIsMenuOpen(false);
+    toast.success("Link copied to clipboard");
   };
 
-  const pillButtonClass = buttonVariants({
-    variant: "outline",
-    size: "sm",
-    className: "flex shrink-0 items-center gap-1.5 whitespace-nowrap",
-  });
-
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      {/* View Preview */}
-      {previewArtifact?.url && (
-        <a
-          href={previewArtifact.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className={pillButtonClass}
+    <>
+      <div className="flex flex-wrap items-stretch gap-2">
+        {/* View Preview */}
+        {previewUrl && (
+          <Button variant="outline" size="sm" className="gap-1.5" asChild>
+            <a href={previewUrl} target="_blank" rel="noopener noreferrer">
+              <GlobeIcon className="w-4 h-4" />
+              <span>View preview</span>
+              {previewArtifact?.metadata?.previewStatus === "outdated" && (
+                <span className="text-xs text-yellow-600 dark:text-yellow-400">(outdated)</span>
+              )}
+            </a>
+          </Button>
+        )}
+
+        {/* View PR */}
+        {prUrl && (
+          <Button variant="outline" size="sm" className="gap-1.5" asChild>
+            <a href={prUrl} target="_blank" rel="noopener noreferrer">
+              <GitPrIcon className="w-4 h-4" />
+              <span>View PR</span>
+            </a>
+          </Button>
+        )}
+
+        {/* Archive/Unarchive */}
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleArchiveToggle}
+          disabled={isArchiving}
+          className="gap-1.5"
         >
-          <GlobeIcon className="w-4 h-4" />
-          <span>View preview</span>
-          {previewArtifact.metadata?.previewStatus === "outdated" && (
-            <span className="text-xs text-warning">(outdated)</span>
-          )}
-        </a>
-      )}
+          <ArchiveIcon className="w-4 h-4" />
+          <span>{isArchived ? "Unarchive" : "Archive"}</span>
+        </Button>
 
-      {/* View PR */}
-      {prArtifact?.url && (
-        <a
-          href={prArtifact.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className={pillButtonClass}
-        >
-          <GitPrIcon className="w-4 h-4" />
-          <span>View PR</span>
-        </a>
-      )}
-
-      {/* Archive/Unarchive */}
-      <button
-        onClick={handleArchiveToggle}
-        disabled={isArchiving}
-        className={`${pillButtonClass} disabled:opacity-50`}
-      >
-        <ArchiveIcon className="w-4 h-4" />
-        <span>{isArchived ? "Unarchive" : "Archive"}</span>
-      </button>
-
-      {/* More menu */}
-      <div className="relative shrink-0">
-        <button
-          onClick={() => setIsMenuOpen(!isMenuOpen)}
-          className="flex items-center justify-center w-8 h-8 text-muted-foreground hover:text-foreground border border-border hover:bg-muted transition-colors"
-        >
-          <MoreIcon className="w-4 h-4" />
-        </button>
-
-        {isMenuOpen && (
-          <>
-            <div className="fixed inset-0 z-10" onClick={() => setIsMenuOpen(false)} />
-            <div className="absolute bottom-full right-0 mb-2 w-48 bg-background shadow-lg border border-border py-1 z-20">
-              <button
-                onClick={handleCopyLink}
-                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted"
-              >
-                <LinkIcon className="w-4 h-4" />
-                Copy link
-              </button>
-              {prArtifact?.url && (
-                <a
-                  href={prArtifact.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted"
-                  onClick={() => setIsMenuOpen(false)}
-                >
+        {/* More menu */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="outline" size="sm" className="!px-2">
+              <MoreIcon className="w-4 h-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" side="top">
+            <DropdownMenuItem onClick={handleCopyLink}>
+              <LinkIcon className="w-4 h-4" />
+              Copy link
+            </DropdownMenuItem>
+            {prUrl && (
+              <DropdownMenuItem asChild>
+                <a href={prUrl} target="_blank" rel="noopener noreferrer">
                   <GitHubIcon className="w-4 h-4" />
                   View in GitHub
                 </a>
-              )}
-            </div>
-          </>
-        )}
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
-    </div>
+
+      <AlertDialog open={showArchiveDialog} onOpenChange={setShowArchiveDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Archive session</AlertDialogTitle>
+            <AlertDialogDescription>
+              Archive this session? You can restore archived sessions from Settings &gt; Data
+              Controls.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmArchive}>Archive</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }

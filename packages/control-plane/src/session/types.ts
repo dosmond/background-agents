@@ -3,15 +3,18 @@
  */
 
 import type {
+  Attachment,
   SessionStatus,
   SandboxStatus,
   GitSyncStatus,
   MessageStatus,
   MessageSource,
   ParticipantRole,
+  SpawnSource,
   ArtifactType,
   EventType,
 } from "../types";
+import type { GitPushSpec } from "../source-control";
 
 // Database row types (match SQLite schema)
 
@@ -22,7 +25,7 @@ export interface SessionRow {
   repo_owner: string;
   repo_name: string;
   repo_id: number | null;
-  repo_default_branch: string;
+  base_branch: string;
   branch_name: string | null;
   base_sha: string | null;
   current_sha: string | null;
@@ -34,6 +37,10 @@ export interface SessionRow {
   provider_fallback_until_ms: number | null;
   provider_fallback_reason: "unsupported_model" | "cursor_429" | "cursor_quota_exhausted" | null;
   status: SessionStatus;
+  parent_session_id: string | null;
+  spawn_source: SpawnSource;
+  spawn_depth: number;
+  code_server_enabled: number; // 0 = disabled (default), 1 = enabled
   created_at: number;
   updated_at: number;
 }
@@ -100,6 +107,8 @@ export interface SandboxRow {
   last_activity: number | null; // Last activity timestamp for inactivity-based snapshot
   last_spawn_error: string | null;
   last_spawn_error_at: number | null;
+  code_server_url: string | null;
+  code_server_password: string | null;
   created_at: number;
 }
 
@@ -119,12 +128,7 @@ export interface PromptCommand {
     scmName: string | null;
     scmEmail: string | null;
   };
-  attachments?: Array<{
-    type: string;
-    name: string;
-    url?: string;
-    content?: string;
-  }>;
+  attachments?: Attachment[];
 }
 
 export interface StopCommand {
@@ -139,7 +143,23 @@ export interface ShutdownCommand {
   type: "shutdown";
 }
 
-export type SandboxCommand = PromptCommand | StopCommand | SnapshotCommand | ShutdownCommand;
+export interface AckCommand {
+  type: "ack";
+  ackId: string;
+}
+
+export interface PushCommand {
+  type: "push";
+  pushSpec: GitPushSpec;
+}
+
+export type SandboxCommand =
+  | PromptCommand
+  | StopCommand
+  | SnapshotCommand
+  | ShutdownCommand
+  | AckCommand
+  | PushCommand;
 
 // Internal session update types
 

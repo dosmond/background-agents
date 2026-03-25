@@ -40,6 +40,7 @@ interface ComboboxProps<T = string> {
   prependContent?: (helpers: { select: (value: T) => void }) => ReactNode;
   disabled?: boolean;
   triggerClassName?: string;
+  maxDisplayed?: number;
 }
 
 export function Combobox<T = string>({
@@ -55,6 +56,7 @@ export function Combobox<T = string>({
   prependContent,
   disabled = false,
   triggerClassName = "",
+  maxDisplayed,
 }: ComboboxProps<T>) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -62,6 +64,7 @@ export function Combobox<T = string>({
   const containerRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const wasOpenRef = useRef(false);
   const instanceId = useId();
   const listboxId = `${instanceId}-listbox`;
   const optionIdPrefix = `${instanceId}-option`;
@@ -111,31 +114,66 @@ export function Combobox<T = string>({
     return items.filter((opt) => filterOption(opt, normalizedQuery));
   })();
 
-  const flatOptions = flattenOptions(filteredItems);
+  // Apply maxDisplayed cap to limit rendered DOM nodes
+  const { displayItems, hiddenCount } = (() => {
+    if (!maxDisplayed) return { displayItems: filteredItems, hiddenCount: 0 };
+
+    const allFiltered = flattenOptions(filteredItems);
+    if (allFiltered.length <= maxDisplayed) return { displayItems: filteredItems, hiddenCount: 0 };
+
+    const overflow = allFiltered.length - maxDisplayed;
+
+    if (isGrouped(filteredItems)) {
+      let remaining = maxDisplayed;
+      const truncated: ComboboxGroup<T>[] = [];
+      for (const group of filteredItems) {
+        if (remaining <= 0) break;
+        if (group.options.length <= remaining) {
+          truncated.push(group);
+          remaining -= group.options.length;
+        } else {
+          truncated.push({ ...group, options: group.options.slice(0, remaining) });
+          remaining = 0;
+        }
+      }
+      return { displayItems: truncated, hiddenCount: overflow };
+    }
+
+    return {
+      displayItems: (filteredItems as ComboboxOption<T>[]).slice(0, maxDisplayed),
+      hiddenCount: overflow,
+    };
+  })();
+
+  const flatOptions = flattenOptions(displayItems);
 
   const hasResults = flatOptions.length > 0;
 
-  // Reset active index when filtered results change (e.g. typing in search)
+  // Reset active index when search query changes (not on every render).
+  // Depends on normalizedQuery (a stable string), NOT flatOptions (unstable array ref).
   useEffect(() => {
-    if (open && flatOptions.length > 0) {
-      setActiveIndex(0);
-    } else {
+    if (!open) {
       setActiveIndex(-1);
+      return;
     }
-    // Use normalizedQuery as dependency instead of flatOptions to avoid reference issues
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [normalizedQuery, open]);
+    setActiveIndex(flatOptions.length > 0 ? 0 : -1);
+  }, [normalizedQuery, open, flatOptions.length]);
 
-  // Set initial active index to the selected value when opening
+  // Set initial active index to the selected value when opening.
+  // Note: flatOptions is an unstable dependency (new array each render), but the
+  // justOpened guard ensures we only mutate state on the open transition, so the
+  // instability is harmless — the effect runs but bails out immediately.
   useEffect(() => {
-    if (!open) return;
+    const justOpened = open && !wasOpenRef.current;
+    wasOpenRef.current = open;
+
+    if (!justOpened) return;
+
     const selectedIdx = flatOptions.findIndex((opt) => opt.value === value);
     if (selectedIdx >= 0) {
       setActiveIndex(selectedIdx);
     }
-    // Only run when dropdown opens
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [flatOptions, open, value]);
 
   // Scroll active option into view
   useEffect(() => {
@@ -258,9 +296,9 @@ export function Combobox<T = string>({
               <div className="px-3 py-2 text-sm text-muted-foreground">
                 No results match {query.trim()}
               </div>
-            ) : isGrouped(filteredItems) ? (
-              filteredItems.map((group, groupIdx) => {
-                const groupOffset = filteredItems
+            ) : isGrouped(displayItems) ? (
+              displayItems.map((group, groupIdx) => {
+                const groupOffset = displayItems
                   .slice(0, groupIdx)
                   .reduce((sum, g) => sum + g.options.length, 0);
                 return (
@@ -291,7 +329,7 @@ export function Combobox<T = string>({
                 );
               })
             ) : (
-              (filteredItems as ComboboxOption<T>[]).map((option, idx) => (
+              (displayItems as ComboboxOption<T>[]).map((option, idx) => (
                 <OptionButton
                   key={String(option.value)}
                   option={option}
@@ -303,6 +341,11 @@ export function Combobox<T = string>({
                   dataIndex={idx}
                 />
               ))
+            )}
+            {hiddenCount > 0 && (
+              <div className="px-3 py-2 text-xs text-muted-foreground border-t border-border-muted mt-1">
+                Type to search {hiddenCount} more...
+              </div>
             )}
           </div>
         </div>
