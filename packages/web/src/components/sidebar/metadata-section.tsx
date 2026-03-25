@@ -1,16 +1,20 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { formatModelName, truncateBranch, copyToClipboard } from "@/lib/format";
 import { formatRelativeTime } from "@/lib/time";
+import { getSafeExternalUrl } from "@/lib/urls";
 import type { Artifact } from "@/types/session";
 import {
   ClockIcon,
   SparkleIcon,
   GitHubIcon,
   GitPrIcon,
+  BranchIcon,
   CopyIcon,
   CheckIcon,
+  LinkIcon,
 } from "@/components/ui/icons";
 import { Badge, prBadgeVariant } from "@/components/ui/badge";
 
@@ -20,10 +24,12 @@ interface MetadataSectionProps {
   reasoningEffort?: string;
   providerMode?: "cursor" | "provider";
   providerFallbackReason?: "unsupported_model" | "cursor_429" | "cursor_quota_exhausted" | null;
+  baseBranch: string;
   branchName?: string;
   repoOwner?: string;
   repoName?: string;
   artifacts?: Artifact[];
+  parentSessionId?: string | null;
 }
 
 export function MetadataSection({
@@ -32,10 +38,12 @@ export function MetadataSection({
   reasoningEffort,
   providerMode,
   providerFallbackReason,
+  baseBranch,
   branchName,
   repoOwner,
   repoName,
   artifacts = [],
+  parentSessionId,
 }: MetadataSectionProps) {
   const [copied, setCopied] = useState(false);
 
@@ -45,7 +53,9 @@ export function MetadataSection({
   );
   const prNumber = prArtifact?.metadata?.prNumber;
   const prState = prArtifact?.metadata?.prState;
-  const prUrl = prArtifact?.url || manualPrArtifact?.metadata?.createPrUrl || manualPrArtifact?.url;
+  const prUrl = getSafeExternalUrl(
+    prArtifact?.url || manualPrArtifact?.metadata?.createPrUrl || manualPrArtifact?.url
+  );
   const branchUrl =
     branchName && repoOwner && repoName
       ? `https://github.com/${repoOwner}/${repoName}/tree/${encodeURIComponent(branchName)}`
@@ -68,6 +78,16 @@ export function MetadataSection({
         <ClockIcon className="w-4 h-4" />
         <span>{formatRelativeTime(createdAt)}</span>
       </div>
+
+      {/* Parent session */}
+      {parentSessionId && (
+        <div className="flex items-center gap-2 text-sm">
+          <LinkIcon className="w-4 h-4 text-muted-foreground" />
+          <Link href={`/session/${parentSessionId}`} className="text-accent hover:underline">
+            Parent session
+          </Link>
+        </div>
+      )}
 
       {/* Model */}
       {model && (
@@ -111,7 +131,29 @@ export function MetadataSection({
         </div>
       )}
 
-      {/* Branch */}
+      {/* Base Branch */}
+      {baseBranch && (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <BranchIcon className="w-4 h-4" />
+          {repoOwner && repoName ? (
+            <a
+              href={`https://github.com/${repoOwner}/${repoName}/tree/${encodeURIComponent(baseBranch)}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent truncate max-w-[180px] hover:underline"
+              title={baseBranch}
+            >
+              {truncateBranch(baseBranch)}
+            </a>
+          ) : (
+            <span className="truncate max-w-[180px]" title={baseBranch}>
+              {truncateBranch(baseBranch)}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Working Branch */}
       {branchName && (
         <div className="flex items-center gap-2 text-sm">
           <GitPrIcon className="w-4 h-4 text-muted-foreground" />

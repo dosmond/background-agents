@@ -5,7 +5,7 @@
  * enabling unit testing and future provider abstraction.
  */
 
-import { generateInternalToken } from "@open-inspect/shared";
+import { ModalApiError } from "../client";
 import type { ModalClient } from "../client";
 import {
   DEFAULT_SANDBOX_TIMEOUT_SECONDS,
@@ -29,7 +29,7 @@ import {
  * @example
  * ```typescript
  * const client = createModalClient(secret, workspace);
- * const provider = new ModalSandboxProvider(client, secret);
+ * const provider = new ModalSandboxProvider(client);
  *
  * try {
  *   const result = await provider.createSandbox(config);
@@ -49,37 +49,42 @@ export class ModalSandboxProvider implements SandboxProvider {
     supportsWarm: true,
   };
 
-  constructor(
-    private readonly client: ModalClient,
-    private readonly secret: string
-  ) {}
+  constructor(private readonly client: ModalClient) {}
 
   /**
    * Create a new sandbox via Modal API.
    */
   async createSandbox(config: CreateSandboxConfig): Promise<CreateSandboxResult> {
     try {
-      const result = await this.client.createSandbox({
-        sessionId: config.sessionId,
-        sandboxId: config.sandboxId,
-        repoOwner: config.repoOwner,
-        repoName: config.repoName,
-        controlPlaneUrl: config.controlPlaneUrl,
-        sandboxAuthToken: config.sandboxAuthToken,
-        opencodeSessionId: config.opencodeSessionId,
-        gitUserName: config.gitUserName,
-        gitUserEmail: config.gitUserEmail,
-        provider: config.provider,
-        model: config.model,
-        userEnvVars: config.userEnvVars,
-        mcpConfig: config.mcpConfig,
-      });
+      const result = await this.client.createSandbox(
+        {
+          sessionId: config.sessionId,
+          sandboxId: config.sandboxId,
+          repoOwner: config.repoOwner,
+          repoName: config.repoName,
+          controlPlaneUrl: config.controlPlaneUrl,
+          sandboxAuthToken: config.sandboxAuthToken,
+          opencodeSessionId: config.opencodeSessionId,
+          provider: config.provider,
+          model: config.model,
+          userEnvVars: config.userEnvVars,
+          mcpConfig: config.mcpConfig,
+          repoImageId: config.repoImageId,
+          repoImageSha: config.repoImageSha,
+          timeoutSeconds: config.timeoutSeconds,
+          branch: config.branch,
+          codeServerEnabled: config.codeServerEnabled,
+        },
+        config.correlation
+      );
 
       return {
         sandboxId: result.sandboxId,
         providerObjectId: result.modalObjectId,
         status: result.status,
         createdAt: result.createdAt,
+        codeServerUrl: result.codeServerUrl,
+        codeServerPassword: result.codeServerPassword,
       };
     } catch (error) {
       throw this.classifyError("Failed to create sandbox", error);
@@ -91,56 +96,33 @@ export class ModalSandboxProvider implements SandboxProvider {
    */
   async restoreFromSnapshot(config: RestoreConfig): Promise<RestoreResult> {
     try {
-      const restoreUrl = this.client.getRestoreSandboxUrl();
-      const authToken = await generateInternalToken(this.secret);
-
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${authToken}`,
-      };
-      if (config.traceId) headers["x-trace-id"] = config.traceId;
-      if (config.requestId) headers["x-request-id"] = config.requestId;
-
-      const response = await fetch(restoreUrl, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          snapshot_image_id: config.snapshotImageId,
-          session_config: {
-            session_id: config.sessionId,
-            repo_owner: config.repoOwner,
-            repo_name: config.repoName,
-            provider: config.provider,
-            model: config.model,
-          },
-          sandbox_id: config.sandboxId,
-          control_plane_url: config.controlPlaneUrl,
-          sandbox_auth_token: config.sandboxAuthToken,
-          user_env_vars: config.userEnvVars || null,
-          mcp_config: config.mcpConfig || null,
-          timeout_seconds: config.timeoutSeconds ?? DEFAULT_SANDBOX_TIMEOUT_SECONDS,
-        }),
-      });
-
-      // Check HTTP status before parsing JSON
-      if (!response.ok) {
-        throw this.classifyErrorWithStatus(
-          `Restore failed with HTTP ${response.status}`,
-          response.status
-        );
-      }
-
-      const result = (await response.json()) as {
-        success: boolean;
-        data?: { sandbox_id: string; modal_object_id?: string };
-        error?: string;
-      };
+      const result = await this.client.restoreSandbox(
+        {
+          snapshotImageId: config.snapshotImageId,
+          sessionId: config.sessionId,
+          sandboxId: config.sandboxId,
+          sandboxAuthToken: config.sandboxAuthToken,
+          controlPlaneUrl: config.controlPlaneUrl,
+          repoOwner: config.repoOwner,
+          repoName: config.repoName,
+          provider: config.provider,
+          model: config.model,
+          userEnvVars: config.userEnvVars,
+          mcpConfig: config.mcpConfig,
+          timeoutSeconds: config.timeoutSeconds ?? DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+          branch: config.branch,
+          codeServerEnabled: config.codeServerEnabled,
+        },
+        config.correlation
+      );
 
       if (result.success) {
         return {
           success: true,
-          sandboxId: result.data?.sandbox_id,
-          providerObjectId: result.data?.modal_object_id,
+          sandboxId: result.sandboxId,
+          providerObjectId: result.modalObjectId,
+          codeServerUrl: result.codeServerUrl,
+          codeServerPassword: result.codeServerPassword,
         };
       }
 
@@ -149,6 +131,12 @@ export class ModalSandboxProvider implements SandboxProvider {
         error: result.error || "Unknown restore error",
       };
     } catch (error) {
+      if (error instanceof ModalApiError) {
+        throw this.classifyErrorWithStatus(
+          `Restore failed with HTTP ${error.status}`,
+          error.status
+        );
+      }
       if (error instanceof SandboxProviderError) {
         throw error;
       }
@@ -161,44 +149,19 @@ export class ModalSandboxProvider implements SandboxProvider {
    */
   async takeSnapshot(config: SnapshotConfig): Promise<SnapshotResult> {
     try {
-      const snapshotUrl = this.client.getSnapshotSandboxUrl();
-      const authToken = await generateInternalToken(this.secret);
-
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${authToken}`,
-      };
-      if (config.traceId) headers["x-trace-id"] = config.traceId;
-      if (config.requestId) headers["x-request-id"] = config.requestId;
-
-      const response = await fetch(snapshotUrl, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          sandbox_id: config.providerObjectId, // Modal's internal object ID
-          session_id: config.sessionId,
+      const result = await this.client.snapshotSandbox(
+        {
+          providerObjectId: config.providerObjectId,
+          sessionId: config.sessionId,
           reason: config.reason,
-        }),
-      });
+        },
+        config.correlation
+      );
 
-      // Check HTTP status before parsing JSON
-      if (!response.ok) {
-        throw this.classifyErrorWithStatus(
-          `Snapshot failed with HTTP ${response.status}`,
-          response.status
-        );
-      }
-
-      const result = (await response.json()) as {
-        success: boolean;
-        data?: { image_id: string };
-        error?: string;
-      };
-
-      if (result.success && result.data?.image_id) {
+      if (result.success && result.imageId) {
         return {
           success: true,
-          imageId: result.data.image_id,
+          imageId: result.imageId,
         };
       }
 
@@ -207,6 +170,12 @@ export class ModalSandboxProvider implements SandboxProvider {
         error: result.error || "Unknown snapshot error",
       };
     } catch (error) {
+      if (error instanceof ModalApiError) {
+        throw this.classifyErrorWithStatus(
+          `Snapshot failed with HTTP ${error.status}`,
+          error.status
+        );
+      }
       if (error instanceof SandboxProviderError) {
         throw error;
       }
@@ -270,9 +239,8 @@ export class ModalSandboxProvider implements SandboxProvider {
  * Create a Modal sandbox provider.
  *
  * @param client - ModalClient instance for API calls
- * @param secret - MODAL_API_SECRET for authentication
  * @returns ModalSandboxProvider instance
  */
-export function createModalProvider(client: ModalClient, secret: string): ModalSandboxProvider {
-  return new ModalSandboxProvider(client, secret);
+export function createModalProvider(client: ModalClient): ModalSandboxProvider {
+  return new ModalSandboxProvider(client);
 }

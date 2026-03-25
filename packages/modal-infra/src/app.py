@@ -6,11 +6,17 @@ all sandbox operations.
 """
 
 import os
+from pathlib import Path
 from urllib.parse import urlparse
 
 import modal
 
+import sandbox_runtime
+
 from .log_config import get_logger
+
+# Path to sandbox_runtime source — bundled into function_image so shims can resolve
+_SANDBOX_RUNTIME_DIR = Path(sandbox_runtime.__file__).parent
 
 log = get_logger("app")
 
@@ -19,12 +25,18 @@ app = modal.App("open-inspect")
 
 # Image for Modal functions (not sandbox)
 # Includes all dependencies needed by the function modules at import time
-function_image = modal.Image.debian_slim(python_version="3.12").pip_install(
-    "pydantic>=2.0",
-    "httpx",
-    "fastapi",
-    "modal",  # Required for sandbox.manager imports
-    "PyJWT[crypto]",  # For GitHub App token generation
+function_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .apt_install("git")  # For scheduler git ls-remote checks
+    .pip_install(
+        "pydantic>=2.0",
+        "httpx",
+        "fastapi",
+        "modal",  # Required for sandbox.manager imports
+        "PyJWT[crypto]",  # For GitHub App token generation
+    )
+    # Bundle sandbox_runtime so modal-infra shims can import from it at runtime
+    .add_local_dir(str(_SANDBOX_RUNTIME_DIR), remote_path="/root/sandbox_runtime")
 )
 
 # Secrets for LLM API keys - defined in Modal dashboard or CLI
@@ -41,12 +53,13 @@ github_app_secrets = modal.Secret.from_name(
     required_keys=["GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "GITHUB_APP_INSTALLATION_ID"],
 )
 
-# Secret for internal API authentication (control plane -> Modal)
-# Used to verify requests from the control plane to Modal endpoints
+# Secret for internal API authentication (bidirectional)
+# MODAL_API_SECRET: verify requests from control plane to Modal endpoints
+# INTERNAL_CALLBACK_SECRET: sign requests from Modal to control plane
 # Also contains ALLOWED_CONTROL_PLANE_HOSTS for URL validation
 internal_api_secret = modal.Secret.from_name(
     "internal-api",
-    required_keys=["MODAL_API_SECRET"],
+    required_keys=["MODAL_API_SECRET", "INTERNAL_CALLBACK_SECRET"],
 )
 
 

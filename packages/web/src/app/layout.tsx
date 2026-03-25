@@ -45,7 +45,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
 
   return (
     <html lang="en" className={`dark ${getThemeClass(initialTheme)}`}>
-      <body className={`${inter.variable} ${jetBrainsMono.variable}`}>
+      <body className={`${inter.variable} ${jetBrainsMono.variable}`} suppressHydrationWarning>
         <Providers initialTheme={initialTheme}>{children}</Providers>
       </body>
     </html>

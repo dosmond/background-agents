@@ -2,6 +2,18 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Remove backtick decorations from prose inline code */
+.prose :where(code):not(:where([class~="not-prose"], [class~="not-prose"] *))::before,
+.prose :where(code):not(:where([class~="not-prose"], [class~="not-prose"] *))::after {
+  content: none;
+}
+
+/* Let the hljs theme control code block background and text color.
+   Padding lives on code.hljs so the theme background covers the full box. */
+pre code.hljs {
+  padding: 0.75rem;
+}
+
 /*
  * Theme tokens.
  *
@@ -15,8 +27,11 @@
   --foreground: #c0caf5;
   --card: #1f2335;
   --card-foreground: #c0caf5;
+  --popover: #1f2335;
+  --popover-foreground: #c0caf5;
   --primary: #c0caf5;
   --primary-foreground: #1a1b26;
+  --secondary: rgba(65, 72, 104, 0.42);
   --accent: #7aa2f7;
   --accent-foreground: #1a1b26;
   --accent-muted: rgba(122, 162, 247, 0.18);
@@ -39,6 +54,7 @@
   --info: #7dcfff;
   --info-foreground: #1a1b26;
   --info-muted: rgba(125, 207, 255, 0.2);
+  --radius: 0.25rem;
 }
 
 .theme-catppuccin {
@@ -46,8 +62,11 @@
   --foreground: #cdd6f4;
   --card: #313244;
   --card-foreground: #cdd6f4;
+  --popover: #313244;
+  --popover-foreground: #cdd6f4;
   --primary: #cdd6f4;
   --primary-foreground: #1e1e2e;
+  --secondary: rgba(69, 71, 90, 0.44);
   --accent: #89b4fa;
   --accent-foreground: #1e1e2e;
   --accent-muted: rgba(137, 180, 250, 0.18);
@@ -70,6 +89,7 @@
   --info: #89dceb;
   --info-foreground: #1e1e2e;
   --info-muted: rgba(137, 220, 235, 0.2);
+  --radius: 0.25rem;
 }
 
 .theme-gruvbox {
@@ -77,8 +97,11 @@
   --foreground: #ebdbb2;
   --card: #32302f;
   --card-foreground: #ebdbb2;
+  --popover: #32302f;
+  --popover-foreground: #ebdbb2;
   --primary: #ebdbb2;
   --primary-foreground: #282828;
+  --secondary: rgba(80, 73, 69, 0.5);
   --accent: #83a598;
   --accent-foreground: #1d2021;
   --accent-muted: rgba(131, 165, 152, 0.2);
@@ -101,6 +124,7 @@
   --info: #83a598;
   --info-foreground: #1d2021;
   --info-muted: rgba(131, 165, 152, 0.2);
+  --radius: 0.25rem;
 }
 
 .theme-kanagawa {
@@ -108,8 +132,11 @@
   --foreground: #dcd7ba;
   --card: #2a2a37;
   --card-foreground: #dcd7ba;
+  --popover: #2a2a37;
+  --popover-foreground: #dcd7ba;
   --primary: #dcd7ba;
   --primary-foreground: #1f1f28;
+  --secondary: rgba(84, 84, 109, 0.44);
   --accent: #7e9cd8;
   --accent-foreground: #1f1f28;
   --accent-muted: rgba(126, 156, 216, 0.2);
@@ -132,6 +159,7 @@
   --info: #7fb4ca;
   --info-foreground: #1f1f28;
   --info-muted: rgba(127, 180, 202, 0.2);
+  --radius: 0.25rem;
 }
 
 .theme-onedark {
@@ -139,8 +167,11 @@
   --foreground: #abb2bf;
   --card: #2f333d;
   --card-foreground: #abb2bf;
+  --popover: #2f333d;
+  --popover-foreground: #abb2bf;
   --primary: #abb2bf;
   --primary-foreground: #282c34;
+  --secondary: rgba(72, 78, 91, 0.48);
   --accent: #61afef;
   --accent-foreground: #0f1115;
   --accent-muted: rgba(97, 175, 239, 0.18);
@@ -163,6 +194,7 @@
   --info: #56b6c2;
   --info-foreground: #0f1115;
   --info-muted: rgba(86, 182, 194, 0.2);
+  --radius: 0.25rem;
 }
 
 html {

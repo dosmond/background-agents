@@ -6,7 +6,7 @@ This image provides a complete development environment with:
 - Node.js 22 LTS, pnpm, Bun runtime
 - Python 3.12 with uv
 - OpenCode CLI pre-installed
-- Playwright with headless Chrome for visual verification
+- agent-browser CLI with headless Chrome for browser automation
 - Sandbox entrypoint and bridge code
 """
 
@@ -14,17 +14,23 @@ from pathlib import Path
 
 import modal
 
-# Get the path to the sandbox code
-SANDBOX_DIR = Path(__file__).parent.parent / "sandbox"
+import sandbox_runtime
 
-# Plugin is now bundled with sandbox code at /app/sandbox/inspect-plugin.js
+# Get the path to the sandbox runtime code (provider-agnostic)
+SANDBOX_RUNTIME_DIR = Path(sandbox_runtime.__file__).parent
 
 # OpenCode version to install
 OPENCODE_VERSION = "latest"
 
+# code-server version to install (pinned for reproducible images)
+CODE_SERVER_VERSION = "4.109.5"
+
+# agent-browser version to install (pinned for reproducible images)
+AGENT_BROWSER_VERSION = "0.21.2"
+
 # Cache buster - change this to force Modal image rebuild
-# v41: Install Doppler CLI for wrapper-based env loading
-CACHE_BUSTER = "v41-doppler-cli"
+# v45: keep Cursor/Doppler tooling and agent-browser/code-server runtime
+CACHE_BUSTER = "v45-agent-browser-doppler"
 
 # Base image with all development tools
 base_image = (
@@ -39,7 +45,7 @@ base_image = (
         "openssh-client",
         "jq",
         "unzip",  # Required for Bun installation
-        # For Playwright
+        # Shared libraries required by headless Chromium
         "libnss3",
         "libnspr4",
         "libatk1.0-0",
@@ -90,7 +96,6 @@ base_image = (
         "uv",
         "httpx",
         "websockets",
-        "playwright",
         "pydantic>=2.0",  # Required for sandbox types
         "PyJWT[crypto]",  # For GitHub App token generation (includes cryptography)
     )
@@ -120,10 +125,20 @@ base_image = (
         "echo 'fi' >> /etc/profile.d/doppler.sh",
         "chmod +x /etc/profile.d/doppler.sh",
     )
-    # Install Playwright browsers (Chromium only to save space)
+    # Install code-server for browser-based VS Code editing (direct .deb from GitHub releases)
     .run_commands(
-        "playwright install chromium",
-        "playwright install-deps chromium",
+        f"curl -fsSL -o /tmp/code-server.deb"
+        f" https://github.com/coder/code-server/releases/download/v{CODE_SERVER_VERSION}"
+        f"/code-server_{CODE_SERVER_VERSION}_amd64.deb",
+        "dpkg -i /tmp/code-server.deb",
+        "rm /tmp/code-server.deb",
+        "code-server --version",
+    )
+    # Install agent-browser CLI and download Chromium
+    .run_commands(
+        f"npm install -g agent-browser@{AGENT_BROWSER_VERSION}",
+        "agent-browser install",
+        "agent-browser --version",
     )
     # Create working directories
     .run_commands(
@@ -139,17 +154,16 @@ base_image = (
             "NODE_ENV": "development",
             "PNPM_HOME": "/root/.local/share/pnpm",
             "PATH": "/root/.local/bin:/root/.bun/bin:/root/.local/share/pnpm:/usr/local/bin:/usr/bin:/bin",
-            "PLAYWRIGHT_BROWSERS_PATH": "/root/.cache/ms-playwright",
             "PYTHONPATH": "/app",
             "SANDBOX_VERSION": CACHE_BUSTER,
             # NODE_PATH for globally installed modules (used by custom tools)
             "NODE_PATH": "/usr/lib/node_modules",
         }
     )
-    # Add sandbox code to the image (includes plugin at /app/sandbox/inspect-plugin.js)
+    # Add sandbox runtime code to the image (provider-agnostic bridge, entrypoint, tools, plugins)
     .add_local_dir(
-        str(SANDBOX_DIR),
-        remote_path="/app/sandbox",
+        str(SANDBOX_RUNTIME_DIR),
+        remote_path="/app/sandbox_runtime",
     )
 )
 

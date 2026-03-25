@@ -30,7 +30,7 @@ function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
     repo_owner: "acme",
     repo_name: "repo",
     repo_id: 1,
-    repo_default_branch: "main",
+    base_branch: "main",
     branch_name: null,
     base_sha: null,
     current_sha: null,
@@ -42,6 +42,10 @@ function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
     provider_fallback_until_ms: null,
     provider_fallback_reason: null,
     status: "active",
+    parent_session_id: null,
+    spawn_source: "user" as const,
+    spawn_depth: 0,
+    code_server_enabled: 0,
     created_at: 1000,
     updated_at: 1000,
     ...overrides,
@@ -109,6 +113,8 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
 
   const broadcast = vi.fn((_message: ServerMessage) => {});
   const spawnSandbox = vi.fn(async () => {});
+  const setSessionStatus = vi.fn(async (_status: string) => {});
+  const reconcileSessionStatusAfterExecution = vi.fn(async (_success: boolean) => {});
   const updateLastActivity = vi.fn();
   const waitUntil = vi.fn();
   const ensureInitialTitle = vi.fn(async (_prompt: string) => {});
@@ -139,6 +145,8 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
     spawnSandbox,
     broadcast,
     ensureInitialTitle,
+    setSessionStatus,
+    reconcileSessionStatusAfterExecution,
   });
 
   return {
@@ -147,6 +155,8 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
     wsManager,
     broadcast,
     spawnSandbox,
+    setSessionStatus,
+    reconcileSessionStatusAfterExecution,
     waitUntil,
     ensureInitialTitle,
   };
@@ -163,6 +173,7 @@ describe("SessionMessageQueue", () => {
       expect.objectContaining({ code: "NOT_SUBSCRIBED" })
     );
     expect(h.repository.createMessage).not.toHaveBeenCalled();
+    expect(h.setSessionStatus).not.toHaveBeenCalled();
   });
 
   it("spawns sandbox when queue has work but no sandbox socket", async () => {
@@ -176,12 +187,13 @@ describe("SessionMessageQueue", () => {
     expect(h.repository.updateMessageToProcessing).not.toHaveBeenCalled();
   });
 
-  it("attempts to generate first title when prompt is queued", async () => {
+  it("initializes title and marks session active when a prompt is queued", async () => {
     const h = buildQueue();
 
     await h.queue.handlePromptMessage({} as WebSocket, { content: "Initial prompt" });
 
     expect(h.ensureInitialTitle).toHaveBeenCalledWith("Initial prompt");
+    expect(h.setSessionStatus).toHaveBeenCalledWith("active");
   });
 
   it("dispatches prompt command when sandbox socket exists", async () => {
@@ -230,6 +242,25 @@ describe("SessionMessageQueue", () => {
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
     expect(h.wsManager.send).toHaveBeenCalledWith(sandboxWs, { type: "stop" });
     expect(h.waitUntil).toHaveBeenCalledTimes(1);
+    expect(h.reconcileSessionStatusAfterExecution).toHaveBeenCalledWith(false);
+  });
+
+  it("suppresses session status reconcile when stopExecution is called with suppress flag", async () => {
+    const h = buildQueue();
+    h.repository.getProcessingMessage.mockReturnValue({ id: "msg-10" });
+
+    await h.queue.stopExecution({ suppressStatusReconcile: true });
+
+    expect(h.reconcileSessionStatusAfterExecution).not.toHaveBeenCalled();
+  });
+
+  it("reconciles session status when failing a stuck processing message", async () => {
+    const h = buildQueue();
+    h.repository.getProcessingMessage.mockReturnValue({ id: "msg-timeout" });
+
+    await h.queue.failStuckProcessingMessage();
+
+    expect(h.reconcileSessionStatusAfterExecution).toHaveBeenCalledWith(false);
   });
 
   it("sets proofRecordingRequested when prompt asks for recording evidence", async () => {

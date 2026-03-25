@@ -1,5 +1,6 @@
 import type { Config } from "tailwindcss";
 import typography from "@tailwindcss/typography";
+import animate from "tailwindcss-animate";
 
 const config: Config = {
   darkMode: "class",
@@ -23,27 +24,35 @@ const config: Config = {
         "accent-muted": "var(--accent-muted)",
         muted: "var(--muted)",
         "muted-foreground": "var(--muted-foreground)",
+        secondary: "var(--secondary)",
         "secondary-foreground": "var(--secondary-foreground)",
         border: "var(--border)",
         "border-muted": "var(--border-muted)",
         input: "var(--input)",
         ring: "var(--ring)",
+        popover: "var(--popover)",
+        "popover-foreground": "var(--popover-foreground)",
+        destructive: "var(--destructive)",
+        "destructive-foreground": "var(--destructive-foreground)",
         success: "var(--success)",
         "success-foreground": "var(--success-foreground)",
         "success-muted": "var(--success-muted)",
         warning: "var(--warning)",
         "warning-foreground": "var(--warning-foreground)",
         "warning-muted": "var(--warning-muted)",
-        destructive: "var(--destructive)",
-        "destructive-foreground": "var(--destructive-foreground)",
         "destructive-muted": "var(--destructive-muted)",
         info: "var(--info)",
         "info-foreground": "var(--info-foreground)",
         "info-muted": "var(--info-muted)",
       },
+      borderRadius: {
+        lg: "calc(var(--radius) * 2)",
+        md: "var(--radius)",
+        sm: "calc(var(--radius) / 2)",
+      },
     },
   },
-  plugins: [typography],
+  plugins: [typography, animate],
 };
 
 export default config;

@@ -4,10 +4,11 @@ import { useIsMobile } from "@/hooks/use-media-query";
 import {
   KeyIcon,
   ModelIcon,
+  BoxIcon,
   KeyboardIcon,
   DataControlsIcon,
   IntegrationsIcon,
-  SettingsIcon,
+  AppearanceIcon,
   ChevronRightIcon,
 } from "@/components/ui/icons";
 
@@ -23,14 +24,19 @@ const NAV_ITEMS = [
     icon: ModelIcon,
   },
   {
-    id: "keyboard-shortcuts",
-    label: "Keyboard",
-    icon: KeyboardIcon,
+    id: "images",
+    label: "Images",
+    icon: BoxIcon,
   },
   {
     id: "appearance",
     label: "Appearance",
-    icon: SettingsIcon,
+    icon: AppearanceIcon,
+  },
+  {
+    id: "keyboard-shortcuts",
+    label: "Keyboard",
+    icon: KeyboardIcon,
   },
   {
     id: "data-controls",

@@ -3,20 +3,46 @@
  */
 
 // Session states
-export type SessionStatus = "created" | "active" | "completed" | "archived";
+export type SessionStatus =
+  | "created"
+  | "active"
+  | "completed"
+  | "failed"
+  | "archived"
+  | "cancelled";
 export type SandboxStatus =
   | "pending"
+  | "spawning"
+  | "connecting"
   | "warming"
   | "syncing"
   | "ready"
   | "running"
+  | "stale"
+  | "snapshotting"
   | "stopped"
   | "failed";
 export type GitSyncStatus = "pending" | "in_progress" | "completed" | "failed";
 export type MessageStatus = "pending" | "processing" | "completed" | "failed";
-export type MessageSource = "web" | "slack" | "extension" | "github";
+export type MessageSource = "web" | "slack" | "linear" | "extension" | "github" | "automation";
 export type ArtifactType = "pr" | "screenshot" | "preview" | "branch" | "recording";
-export type EventType = "tool_call" | "tool_result" | "token" | "error" | "git_sync";
+export type EventType =
+  | "heartbeat"
+  | "token"
+  | "tool_call"
+  | "step_start"
+  | "step_finish"
+  | "tool_result"
+  | "git_sync"
+  | "error"
+  | "execution_complete"
+  | "artifact"
+  | "push_complete"
+  | "push_error"
+  | "user_message";
+export type ParticipantRole = "owner" | "member";
+export type SpawnSource = "user" | "agent" | "automation";
+export type ConfidenceLevel = "high" | "medium" | "low";
 
 // User info for commit attribution
 export interface GitUser {
@@ -31,7 +57,7 @@ export interface SessionParticipant {
   scmLogin: string | null;
   scmName: string | null;
   scmEmail: string | null;
-  role: "owner" | "member";
+  role: ParticipantRole;
 }
 
 // Session state
@@ -40,7 +66,7 @@ export interface Session {
   title: string | null;
   repoOwner: string;
   repoName: string;
-  repoDefaultBranch: string;
+  baseBranch: string;
   branchName: string | null;
   baseSha: string | null;
   currentSha: string | null;
@@ -49,6 +75,9 @@ export interface Session {
   providerFallbackUntilMs?: number | null;
   providerFallbackReason?: "unsupported_model" | "cursor_429" | "cursor_quota_exhausted" | null;
   status: SessionStatus;
+  parentSessionId: string | null;
+  spawnSource: SpawnSource;
+  spawnDepth: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -110,39 +139,114 @@ export interface PullRequest {
   title: string;
   body: string;
   url: string;
-  state: "open" | "closed" | "merged";
+  state: "open" | "closed" | "merged" | "draft";
   headRef: string;
   baseRef: string;
   createdAt: string;
   updatedAt: string;
 }
 
-// Sandbox event from Modal
-export interface SandboxEvent {
-  type: string;
-  sandboxId: string;
-  timestamp: number;
-  messageId?: string;
-  content?: string;
-  tool?: string;
-  args?: Record<string, unknown>;
-  callId?: string;
-  output?: string;
-  result?: string;
-  error?: string;
-  status?: string;
-  sha?: string;
-  success?: boolean;
-  cursorSessionId?: string;
-  artifactType?: string;
-  url?: string;
-  metadata?: Record<string, unknown>;
-  author?: {
-    participantId: string;
-    name: string;
-    avatar?: string;
-  };
-}
+// Sandbox events (from Modal / control-plane synthesized)
+export type SandboxEvent =
+  | { type: "heartbeat"; sandboxId: string; status: string; timestamp: number }
+  | {
+      type: "token";
+      content: string;
+      messageId: string;
+      sandboxId: string;
+      timestamp: number;
+    }
+  | {
+      type: "tool_call";
+      tool: string;
+      args: Record<string, unknown>;
+      callId: string;
+      status?: string;
+      output?: string;
+      messageId: string;
+      sandboxId: string;
+      timestamp: number;
+    }
+  | {
+      type: "step_start";
+      messageId: string;
+      sandboxId: string;
+      timestamp: number;
+      isSubtask?: boolean;
+    }
+  | {
+      type: "step_finish";
+      cost?: number;
+      tokens?: number;
+      reason?: string;
+      messageId: string;
+      sandboxId: string;
+      timestamp: number;
+      isSubtask?: boolean;
+    }
+  | {
+      type: "tool_result";
+      callId: string;
+      result: string;
+      error?: string;
+      messageId: string;
+      sandboxId: string;
+      timestamp: number;
+    }
+  | {
+      type: "git_sync";
+      status: GitSyncStatus;
+      sha?: string;
+      sandboxId: string;
+      timestamp: number;
+    }
+  | {
+      type: "error";
+      error: string;
+      messageId: string;
+      sandboxId: string;
+      timestamp: number;
+    }
+  | {
+      type: "execution_complete";
+      messageId: string;
+      success: boolean;
+      error?: string;
+      sandboxId: string;
+      timestamp: number;
+    }
+  | {
+      type: "artifact";
+      artifactType: string;
+      url: string;
+      metadata?: Record<string, unknown>;
+      sandboxId: string;
+      timestamp: number;
+    }
+  | {
+      type: "push_complete";
+      branchName: string;
+      sandboxId?: string;
+      timestamp: number;
+    }
+  | {
+      type: "push_error";
+      branchName: string;
+      error: string;
+      sandboxId?: string;
+      timestamp: number;
+    }
+  | {
+      type: "user_message";
+      content: string;
+      messageId: string;
+      timestamp: number;
+      author?: {
+        participantId: string;
+        name: string;
+        avatar?: string;
+      };
+    };
 
 // WebSocket message types
 export type ClientMessage =
@@ -159,7 +263,8 @@ export type ClientMessage =
     }
   | { type: "stop" }
   | { type: "typing" }
-  | { type: "presence"; status: "active" | "idle"; cursor?: { line: number; file: string } };
+  | { type: "presence"; status: "active" | "idle"; cursor?: { line: number; file: string } }
+  | { type: "fetch_history"; cursor: { timestamp: number; id: string }; limit?: number };
 
 export type ServerMessage =
   | { type: "pong"; timestamp: number }
@@ -182,8 +287,34 @@ export type ServerMessage =
   | { type: "presence_update"; participants: ParticipantPresence[] }
   | { type: "presence_leave"; userId: string }
   | { type: "sandbox_warming" }
+  | { type: "sandbox_spawning" }
+  | { type: "sandbox_status"; status: SandboxStatus }
   | { type: "sandbox_ready" }
   | { type: "session_state"; state: SessionState }
+  | { type: "sandbox_error"; error: string }
+  | {
+      type: "artifact_created";
+      artifact: { id: string; type: string; url: string; prNumber?: number };
+    }
+  | { type: "snapshot_saved"; imageId: string; reason: string }
+  | { type: "sandbox_restored"; message: string }
+  | { type: "sandbox_warning"; message: string }
+  | { type: "processing_status"; isProcessing: boolean }
+  | {
+      type: "history_page";
+      items: SandboxEvent[];
+      hasMore: boolean;
+      cursor: { timestamp: number; id: string } | null;
+    }
+  | { type: "session_status"; status: SessionStatus }
+  | { type: "session_title"; title: string }
+  | {
+      type: "child_session_update";
+      childSessionId: string;
+      status: SessionStatus;
+      title: string | null;
+    }
+  | { type: "code_server_info"; url: string; password: string }
   | { type: "error"; code: string; message: string };
 
 // Session state sent to clients
@@ -192,6 +323,7 @@ export interface SessionState {
   title: string | null;
   repoOwner: string;
   repoName: string;
+  baseBranch: string;
   branchName: string | null;
   status: SessionStatus;
   sandboxStatus: SandboxStatus;
@@ -203,6 +335,9 @@ export interface SessionState {
   providerFallbackUntilMs?: number | null;
   providerFallbackReason?: "unsupported_model" | "cursor_429" | "cursor_quota_exhausted" | null;
   isProcessing?: boolean;
+  parentSessionId?: string | null;
+  codeServerUrl?: string | null;
+  codeServerPassword?: string | null;
 }
 
 // Participant presence info
@@ -296,6 +431,97 @@ export interface EnrichedRepository extends InstallationRepository {
   metadata?: RepoMetadata;
 }
 
+// Bot package shared types
+export interface RepoConfig {
+  id: string;
+  owner: string;
+  name: string;
+  fullName: string;
+  displayName: string;
+  description: string;
+  defaultBranch: string;
+  private: boolean;
+  aliases?: string[];
+  keywords?: string[];
+  channelAssociations?: string[];
+}
+
+export type ControlPlaneRepo = EnrichedRepository;
+
+export interface ControlPlaneReposResponse {
+  repos: ControlPlaneRepo[];
+  cached: boolean;
+  cachedAt: string;
+}
+
+export interface ClassificationResult {
+  repo: RepoConfig | null;
+  confidence: ConfidenceLevel;
+  reasoning: string;
+  alternatives?: RepoConfig[];
+  needsClarification: boolean;
+}
+
+export interface EventResponse {
+  id: string;
+  type: EventType;
+  data: Record<string, unknown>;
+  messageId: string | null;
+  createdAt: number;
+}
+
+export interface ListEventsResponse {
+  events: EventResponse[];
+  cursor?: string;
+  hasMore: boolean;
+}
+
+export interface ArtifactResponse {
+  id: string;
+  type: ArtifactType;
+  url: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: number;
+}
+
+export interface ListArtifactsResponse {
+  artifacts: ArtifactResponse[];
+}
+
+export interface ToolCallSummary {
+  tool: string;
+  summary: string;
+}
+
+export interface ArtifactInfo {
+  type: ArtifactType;
+  url: string;
+  label: string;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface AgentResponse {
+  textContent: string;
+  toolCalls: ToolCallSummary[];
+  artifacts: ArtifactInfo[];
+  success: boolean;
+}
+
+export interface UserPreferences {
+  userId: string;
+  model: string;
+  reasoningEffort?: string;
+  updatedAt: number;
+}
+
+export interface Logger {
+  debug(msg: string, data?: Record<string, unknown>): void;
+  info(msg: string, data?: Record<string, unknown>): void;
+  warn(msg: string, data?: Record<string, unknown>): void;
+  error(msg: string, data?: Record<string, unknown>): void;
+  child(context: Record<string, unknown>): Logger;
+}
+
 // ─── Callback Context (discriminated union) ──────────────────────────────────
 
 export interface SlackCallbackContext {
@@ -320,7 +546,17 @@ export interface LinearCallbackContext {
   emitToolProgressActivities?: boolean;
 }
 
-export type CallbackContext = SlackCallbackContext | LinearCallbackContext;
+export interface AutomationCallbackContext {
+  source: "automation";
+  automationId: string;
+  runId: string;
+  automationName: string;
+}
+
+export type CallbackContext =
+  | SlackCallbackContext
+  | LinearCallbackContext
+  | AutomationCallbackContext;
 
 // API response types
 export interface CreateSessionRequest {
@@ -329,6 +565,7 @@ export interface CreateSessionRequest {
   title?: string;
   model?: string;
   reasoningEffort?: string;
+  branch?: string;
 }
 
 export interface CreateSessionResponse {
@@ -340,6 +577,132 @@ export interface ListSessionsResponse {
   sessions: Session[];
   cursor?: string;
   hasMore: boolean;
+}
+
+// --- Agent-spawned sub-sessions ---
+
+/** Request body for POST /sessions/:parentId/children */
+export interface SpawnChildSessionRequest {
+  title: string;
+  prompt: string;
+  repoOwner?: string;
+  repoName?: string;
+  model?: string;
+  reasoningEffort?: string;
+}
+
+/** Returned by parent DO's GET /internal/spawn-context */
+export interface SpawnContext {
+  repoOwner: string;
+  repoName: string;
+  repoId: number | null;
+  model: string;
+  reasoningEffort: string | null;
+  baseBranch: string | null;
+  owner: {
+    userId: string;
+    scmUserId: string | null;
+    scmLogin: string | null;
+    scmName: string | null;
+    scmEmail: string | null;
+    scmAccessTokenEncrypted: string | null;
+    scmRefreshTokenEncrypted: string | null;
+    scmTokenExpiresAt: number | null;
+  };
+}
+
+/** Returned by child DO's GET /internal/child-summary */
+export interface ChildSessionDetail {
+  session: {
+    id: string;
+    title: string;
+    status: SessionStatus;
+    repoOwner: string;
+    repoName: string;
+    branchName: string | null;
+    model: string;
+    createdAt: number;
+    updatedAt: number;
+  };
+  sandbox: { status: SandboxStatus } | null;
+  artifacts: Array<{ type: string; url: string; metadata: unknown }>;
+  recentEvents: Array<{ type: string; data: unknown; createdAt: number }>;
+}
+
+// ─── Automation Engine ────────────────────────────────────────────────────────
+
+export type AutomationTriggerType = "schedule";
+
+export type AutomationRunStatus = "starting" | "running" | "completed" | "failed" | "skipped";
+
+export interface Automation {
+  id: string;
+  name: string;
+  repoOwner: string;
+  repoName: string;
+  baseBranch: string;
+  repoId: number | null;
+  instructions: string;
+  triggerType: AutomationTriggerType;
+  scheduleCron: string | null;
+  scheduleTz: string;
+  model: string;
+  reasoningEffort: string | null;
+  enabled: boolean;
+  nextRunAt: number | null;
+  consecutiveFailures: number;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+  deletedAt: number | null;
+}
+
+export interface CreateAutomationRequest {
+  name: string;
+  repoOwner: string;
+  repoName: string;
+  baseBranch?: string;
+  instructions: string;
+  triggerType?: AutomationTriggerType;
+  scheduleCron: string;
+  scheduleTz: string;
+  model?: string;
+  reasoningEffort?: string | null;
+}
+
+export interface UpdateAutomationRequest {
+  name?: string;
+  instructions?: string;
+  scheduleCron?: string;
+  scheduleTz?: string;
+  model?: string;
+  reasoningEffort?: string | null;
+  baseBranch?: string;
+}
+
+export interface AutomationRun {
+  id: string;
+  automationId: string;
+  sessionId: string | null;
+  status: AutomationRunStatus;
+  skipReason: string | null;
+  failureReason: string | null;
+  scheduledAt: number;
+  startedAt: number | null;
+  completedAt: number | null;
+  createdAt: number;
+  sessionTitle: string | null;
+  artifactSummary: string | null;
+}
+
+export interface ListAutomationsResponse {
+  automations: Automation[];
+  total: number;
+}
+
+export interface ListAutomationRunsResponse {
+  runs: AutomationRun[];
+  total: number;
 }
 
 export * from "./integrations";

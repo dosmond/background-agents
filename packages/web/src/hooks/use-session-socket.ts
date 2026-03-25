@@ -1,8 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import type { Artifact } from "@/types/session";
-import type { SandboxEvent } from "@/lib/tool-formatters";
+import { mutate } from "swr";
+import { SIDEBAR_SESSIONS_KEY } from "@/lib/session-list";
+import type { Artifact, SandboxEvent } from "@/types/session";
+import type {
+  ParticipantPresence,
+  SandboxEvent as SharedSandboxEvent,
+  ServerMessage,
+  SessionState as SharedSessionState,
+} from "@open-inspect/shared";
 
 // WebSocket URL (should come from env in production)
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8787";
@@ -20,32 +27,9 @@ interface Message {
   createdAt: number;
 }
 
-interface SessionState {
-  id: string;
-  title: string | null;
-  repoOwner: string;
-  repoName: string;
-  branchName: string | null;
-  status: string;
-  sandboxStatus: string;
-  messageCount: number;
-  createdAt: number;
-  model?: string;
-  reasoningEffort?: string;
-  providerMode?: "cursor" | "provider";
-  providerFallbackUntilMs?: number | null;
-  providerFallbackReason?: "unsupported_model" | "cursor_429" | "cursor_quota_exhausted" | null;
-  isProcessing: boolean;
-}
-
-interface Participant {
-  participantId: string;
-  userId: string;
-  name: string;
-  avatar?: string;
-  status: "active" | "idle" | "away";
-  lastSeen: number;
-}
+type SessionState = SharedSessionState;
+type Participant = ParticipantPresence;
+type WsMessage = ServerMessage;
 
 type SendPromptOutcome = "accepted" | "rejected" | "local_enqueued";
 
@@ -88,6 +72,7 @@ function collapseTokenEvents(
   pendingTextRef: React.MutableRefObject<{
     content: string;
     messageId: string;
+    sandboxId: string;
     timestamp: number;
   } | null>
 ): SandboxEvent[] {
@@ -97,6 +82,7 @@ function collapseTokenEvents(
       pendingTextRef.current = {
         content: evt.content,
         messageId: evt.messageId,
+        sandboxId: evt.sandboxId,
         timestamp: evt.timestamp,
       };
     } else if (evt.type === "execution_complete") {
@@ -107,6 +93,7 @@ function collapseTokenEvents(
           type: "token",
           content: pending.content,
           messageId: pending.messageId,
+          sandboxId: pending.sandboxId,
           timestamp: pending.timestamp,
         });
       }
@@ -118,6 +105,34 @@ function collapseTokenEvents(
   return result;
 }
 
+function parseWsMessage(raw: unknown): WsMessage | null {
+  if (!raw || typeof raw !== "object") return null;
+  if (!("type" in raw)) return null;
+  return raw as WsMessage;
+}
+
+function toUiSandboxEvent(event: SharedSandboxEvent): SandboxEvent {
+  return {
+    ...event,
+    timestamp: typeof event.timestamp === "number" ? event.timestamp : Date.now() / 1000,
+  };
+}
+
+function toUiArtifact(artifact: {
+  id: string;
+  type: string;
+  url: string;
+  prNumber?: number;
+}): Artifact {
+  return {
+    id: artifact.id,
+    type: artifact.type as Artifact["type"],
+    url: artifact.url,
+    createdAt: Date.now(),
+    metadata: artifact.prNumber ? { prNumber: artifact.prNumber } : undefined,
+  };
+}
+
 export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
   const wsRef = useRef<WebSocket | null>(null);
   const connectingRef = useRef(false);
@@ -126,9 +141,12 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
   const wsTokenRef = useRef<string | null>(null);
   // Accumulates text during streaming, displayed only on completion to avoid duplicate display.
   // Stores only the latest token since token events contain the full accumulated text (not incremental).
-  const pendingTextRef = useRef<{ content: string; messageId: string; timestamp: number } | null>(
-    null
-  );
+  const pendingTextRef = useRef<{
+    content: string;
+    messageId: string;
+    sandboxId: string;
+    timestamp: number;
+  } | null>(null);
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [replaying, setReplaying] = useState(true);
@@ -163,6 +181,7 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
       pendingTextRef.current = {
         content: event.content,
         messageId: event.messageId,
+        sandboxId: event.sandboxId,
         timestamp: event.timestamp,
       };
     } else if (event.type === "execution_complete") {
@@ -176,6 +195,7 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
             type: "token",
             content: pending.content,
             messageId: pending.messageId,
+            sandboxId: pending.sandboxId,
             timestamp: pending.timestamp,
           },
         ]);
@@ -188,32 +208,7 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
   }, []);
 
   const handleMessage = useCallback(
-    (data: {
-      type: string;
-      state?: SessionState;
-      event?: SandboxEvent;
-      items?: SandboxEvent[];
-      participants?: Participant[];
-      artifact?: Artifact;
-      userId?: string;
-      messageId?: string;
-      requestId?: string;
-      position?: number;
-      status?: string;
-      error?: string;
-      participantId?: string;
-      participant?: { participantId: string; name: string; avatar?: string };
-      isProcessing?: boolean;
-      hasMore?: boolean;
-      cursor?: { timestamp: number; id: string } | null;
-      replay?: {
-        events: SandboxEvent[];
-        hasMore: boolean;
-        cursor: { timestamp: number; id: string } | null;
-      };
-      spawnError?: string | null;
-      title?: string | null;
-    }) => {
+    (data: WsMessage) => {
       switch (data.type) {
         case "subscribed": {
           console.log("WebSocket subscribed to session");
@@ -222,7 +217,11 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
           setArtifacts([]);
           pendingTextRef.current = null;
           if (data.state) {
-            setSessionState(data.state);
+            setSessionState({
+              ...data.state,
+              // Backward-compatible default for older sessions that may omit this.
+              isProcessing: data.state.isProcessing ?? false,
+            });
           }
           // Store the current user's participant ID and info for author attribution
           if (data.participantId) {
@@ -234,7 +233,11 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
           }
 
           // Process batched replay events in a single state update
-          setEvents(data.replay ? collapseTokenEvents(data.replay.events, pendingTextRef) : []);
+          setEvents(
+            data.replay
+              ? collapseTokenEvents(data.replay.events.map(toUiSandboxEvent), pendingTextRef)
+              : []
+          );
           setHasMoreHistory(data.replay?.hasMore ?? false);
           cursorRef.current = data.replay?.cursor ?? null;
           setReplaying(false);
@@ -252,15 +255,13 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
 
         case "sandbox_event":
           if (data.event) {
-            processSandboxEvent(data.event);
+            processSandboxEvent(toUiSandboxEvent(data.event));
           }
           break;
 
         case "history_page": {
-          if (data.items) {
-            // Prepend older events to the beginning
-            setEvents((prev) => [...data.items!, ...prev]);
-          }
+          // Prepend older events to the beginning
+          setEvents((prev) => [...data.items.map(toUiSandboxEvent), ...prev]);
           setHasMoreHistory(data.hasMore ?? false);
           cursorRef.current = data.cursor ?? null;
           setLoadingHistory(false);
@@ -269,31 +270,27 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
 
         case "presence_sync":
         case "presence_update":
-          if (data.participants) {
-            setParticipants(data.participants);
-            // Update current participant info for author attribution
-            setCurrentParticipantId((currentId) => {
-              if (currentId) {
-                const currentParticipant = data.participants!.find(
-                  (p) => p.participantId === currentId
-                );
-                if (currentParticipant) {
-                  currentParticipantRef.current = {
-                    participantId: currentParticipant.participantId,
-                    name: currentParticipant.name,
-                    avatar: currentParticipant.avatar,
-                  };
-                }
+          setParticipants(data.participants);
+          // Update current participant info for author attribution
+          setCurrentParticipantId((currentId) => {
+            if (currentId) {
+              const currentParticipant = data.participants.find(
+                (p) => p.participantId === currentId
+              );
+              if (currentParticipant) {
+                currentParticipantRef.current = {
+                  participantId: currentParticipant.participantId,
+                  name: currentParticipant.name,
+                  avatar: currentParticipant.avatar,
+                };
               }
-              return currentId;
-            });
-          }
+            }
+            return currentId;
+          });
           break;
 
         case "presence_leave":
-          if (data.userId) {
-            setParticipants((prev) => prev.filter((p) => p.userId !== data.userId));
-          }
+          setParticipants((prev) => prev.filter((p) => p.userId !== data.userId));
           break;
 
         case "sandbox_warming":
@@ -301,14 +298,37 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
           break;
 
         case "sandbox_spawning":
-          setSessionState((prev) => (prev ? { ...prev, sandboxStatus: "spawning" } : null));
+          setSessionState((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  sandboxStatus: "spawning",
+                  codeServerUrl: undefined,
+                  codeServerPassword: undefined,
+                }
+              : null
+          );
           break;
 
-        case "sandbox_status":
-          if (data.status) {
-            const status = data.status;
-            setSessionState((prev) => (prev ? { ...prev, sandboxStatus: status } : null));
-          }
+        case "sandbox_status": {
+          const isTerminal =
+            data.status === "stale" || data.status === "stopped" || data.status === "failed";
+          setSessionState((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  sandboxStatus: data.status,
+                  ...(isTerminal && { codeServerUrl: undefined, codeServerPassword: undefined }),
+                }
+              : null
+          );
+          break;
+        }
+
+        case "code_server_info":
+          setSessionState((prev) =>
+            prev ? { ...prev, codeServerUrl: data.url, codeServerPassword: data.password } : null
+          );
           break;
 
         case "sandbox_ready":
@@ -316,30 +336,26 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
           break;
 
         case "artifact_created":
-          if (data.artifact) {
-            setArtifacts((prev) => {
-              // Avoid duplicates
-              const existing = prev.find((a) => a.id === data.artifact!.id);
-              if (existing) {
-                return prev.map((a) => (a.id === data.artifact!.id ? data.artifact! : a));
-              }
-              return [...prev, data.artifact!];
-            });
-          }
-          break;
-
-        case "artifact_updated":
-          if (data.artifact) {
-            setArtifacts((prev) =>
-              prev.map((a) => (a.id === data.artifact!.id ? data.artifact! : a))
-            );
-          }
+          setArtifacts((prev) => {
+            // Avoid duplicates
+            const existing = prev.find((a) => a.id === data.artifact.id);
+            if (existing) {
+              return prev.map((a) => (a.id === data.artifact.id ? toUiArtifact(data.artifact) : a));
+            }
+            return [...prev, toUiArtifact(data.artifact)];
+          });
           break;
 
         case "session_status":
-          if (data.status) {
-            setSessionState((prev) => (prev ? { ...prev, status: data.status! } : null));
-          }
+          setSessionState((prev) => (prev ? { ...prev, status: data.status } : null));
+          // Revalidate session list so status change is reflected in sidebar
+          mutate(SIDEBAR_SESSIONS_KEY);
+          break;
+
+        case "child_session_update":
+          // Child session spawned or changed status — revalidate child list and sidebar
+          mutate(`/api/sessions/${sessionId}/children`);
+          mutate(SIDEBAR_SESSIONS_KEY);
           break;
 
         case "session_state":
@@ -355,10 +371,7 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
           break;
 
         case "processing_status":
-          if (typeof data.isProcessing === "boolean") {
-            const isProcessing = data.isProcessing;
-            setSessionState((prev) => (prev ? { ...prev, isProcessing } : null));
-          }
+          setSessionState((prev) => (prev ? { ...prev, isProcessing: data.isProcessing } : null));
           break;
 
         case "sandbox_error":
@@ -377,7 +390,7 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
           break;
       }
     },
-    [processSandboxEvent]
+    [processSandboxEvent, sessionId]
   );
 
   const fetchWsToken = useCallback(async (): Promise<string | null> => {
@@ -468,7 +481,8 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
 
     ws.onmessage = (event) => {
       try {
-        const data = JSON.parse(event.data);
+        const data = parseWsMessage(JSON.parse(event.data));
+        if (!data) return;
         handleMessage(data);
       } catch (error) {
         console.error("Failed to parse WebSocket message:", error);
@@ -551,7 +565,11 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
         return "local_enqueued";
       }
 
-      console.log("Sending prompt:", content, "with model:", model, "reasoning:", reasoningEffort);
+      console.log("Sending prompt", {
+        contentLength: content.length,
+        model,
+        reasoningEffort,
+      });
 
       // Optimistically set isProcessing for immediate feedback
       // Server will confirm with processing_status message
@@ -590,6 +608,7 @@ export function useSessionSocket(sessionId: string): UseSessionSocketReturn {
           type: "token",
           content: pending.content,
           messageId: pending.messageId,
+          sandboxId: pending.sandboxId,
           timestamp: pending.timestamp,
         },
       ]);

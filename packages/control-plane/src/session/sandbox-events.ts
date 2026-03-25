@@ -24,6 +24,7 @@ interface SessionSandboxEventProcessorDeps {
   broadcast: (message: ServerMessage) => void;
   getIsProcessing: () => boolean;
   triggerSnapshot: (reason: string) => Promise<void>;
+  reconcileSessionStatusAfterExecution: (success: boolean) => Promise<void>;
   updateLastActivity: (timestamp: number) => void;
   scheduleInactivityCheck: () => Promise<void>;
   processMessageQueue: () => Promise<void>;
@@ -35,6 +36,15 @@ interface SessionSandboxEventProcessorDeps {
     providerFallbackReason: ProviderFallbackReason | null
   ) => void;
 }
+
+/** Event types that require delivery acknowledgement. */
+const CRITICAL_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "execution_complete",
+  "error",
+  "snapshot_ready",
+  "push_complete",
+  "push_error",
+]);
 
 export class SessionSandboxEventProcessor {
   private pendingPushResolvers = new Map<string, PushResolver>();
@@ -48,6 +58,9 @@ export class SessionSandboxEventProcessor {
       this.deps.log.info("Sandbox event", { event_type: event.type });
     }
     const now = Date.now();
+
+    // Extract ackId from the raw event (attached by bridge for critical events)
+    const ackId = (event as Record<string, unknown>).ackId as string | undefined;
 
     if (event.type === "heartbeat") {
       this.deps.repository.updateSandboxHeartbeat(now);
@@ -67,11 +80,13 @@ export class SessionSandboxEventProcessor {
     }
 
     if (event.type === "step_start" || event.type === "step_finish") {
+      this.deps.updateLastActivity(now);
       this.deps.broadcast({ type: "sandbox_event", event });
       return;
     }
 
     if (event.type === "tool_call") {
+      this.deps.updateLastActivity(now);
       if (shouldPersistToolCallEvent(event.status)) {
         this.deps.repository.createEvent({
           id: generateId(),
@@ -85,7 +100,12 @@ export class SessionSandboxEventProcessor {
 
       if (messageId && event.status === "running") {
         this.deps.ctx.waitUntil(
-          this.deps.callbackService.notifyToolCall(messageId, event).catch(() => {})
+          this.deps.callbackService.notifyToolCall(messageId, event).catch((error) => {
+            this.deps.log.error("callback.tool_call.background_error", {
+              message_id: messageId,
+              error,
+            });
+          })
         );
       }
       return;
@@ -160,6 +180,8 @@ export class SessionSandboxEventProcessor {
         this.deps.ctx.waitUntil(
           this.deps.callbackService.notifyComplete(completionMessageId, event.success)
         );
+
+        await this.deps.reconcileSessionStatusAfterExecution(event.success);
       } else {
         this.deps.log.info("prompt.complete", {
           event: "prompt.complete",
@@ -172,6 +194,7 @@ export class SessionSandboxEventProcessor {
       this.deps.updateLastActivity(now);
       await this.deps.scheduleInactivityCheck();
       await this.deps.processMessageQueue();
+      this.sendAck(ackId);
       return;
     }
 
@@ -237,6 +260,10 @@ export class SessionSandboxEventProcessor {
     }
 
     this.deps.broadcast({ type: "sandbox_event", event });
+
+    if (CRITICAL_EVENT_TYPES.has(event.type)) {
+      this.sendAck(ackId);
+    }
   }
 
   async pushBranchToRemote(
@@ -314,6 +341,16 @@ export class SessionSandboxEventProcessor {
     }
 
     this.pendingPushResolvers.delete(normalizedBranch);
+  }
+
+  private sendAck(ackId: string | undefined): void {
+    if (!ackId) return;
+    const sandboxWs = this.deps.wsManager.getSandboxSocket();
+    if (sandboxWs) {
+      this.deps.wsManager.send(sandboxWs, { type: "ack", ackId });
+    } else {
+      this.deps.log.debug("Cannot send ACK: no sandbox socket", { ack_id: ackId });
+    }
   }
 
   private normalizeBranchName(name: string): string {

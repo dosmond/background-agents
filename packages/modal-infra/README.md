@@ -38,7 +38,7 @@ Base image definition with:
 - Python 3.12 with uv
 - OpenCode CLI
 - Doppler CLI
-- Playwright + headless Chrome
+- agent-browser CLI + headless Chrome
 
 ### Sandbox (`src/sandbox/`)
 
@@ -94,6 +94,16 @@ modal secret create internal-api \
 ```
 
 See `.env.example` for a full list of environment variables.
+
+### Install local packages
+
+`sandbox-runtime` is a sibling package in this monorepo (not published to PyPI).
+If you use `uv`, it is resolved automatically. Otherwise install it first:
+
+```bash
+pip install -e ../sandbox-runtime
+pip install -e ".[dev]"
+```
 
 ### Deploy
 
@@ -182,7 +192,11 @@ Wrapper commands (for example `with-dev-env`) can then call Doppler directly in 
 ## Development
 
 ```bash
-# Install dev dependencies
+# Using uv (recommended — resolves sandbox-runtime automatically)
+uv sync --frozen --extra dev
+
+# Using pip (install sandbox-runtime first)
+pip install -e ../sandbox-runtime
 pip install -e ".[dev]"
 
 # Run tests

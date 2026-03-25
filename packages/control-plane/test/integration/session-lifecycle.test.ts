@@ -110,6 +110,34 @@ describe("POST /internal/unarchive", () => {
   });
 });
 
+describe("POST /internal/prompt", () => {
+  it.each(["completed", "failed", "archived", "cancelled"])(
+    "reopens %s session back to active",
+    async (status) => {
+      const { stub } = await initSession({ userId: "user-1" });
+
+      await runInDurableObject(stub, (instance: SessionDO) => {
+        instance.ctx.storage.sql.exec("UPDATE session SET status = ?", status);
+      });
+
+      const promptRes = await stub.fetch("http://internal/internal/prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: "Re-open session",
+          authorId: "user-1",
+          source: "web",
+        }),
+      });
+      expect(promptRes.status).toBe(200);
+
+      const stateRes = await stub.fetch("http://internal/internal/state");
+      const state = await stateRes.json<{ status: string }>();
+      expect(state.status).toBe("active");
+    }
+  );
+});
+
 describe("POST /internal/update-title", () => {
   it("updates title for session participant", async () => {
     const { stub } = await initSession({ userId: "user-1", title: "Original title" });
@@ -139,6 +167,26 @@ describe("POST /internal/update-title", () => {
     });
 
     expect(res.status).toBe(403);
+  });
+
+  it("rejects empty title", async () => {
+    const { stub } = await initSession({ userId: "user-1" });
+    const res = await stub.fetch("http://internal/internal/update-title", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "user-1", title: "" }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects title over 200 characters", async () => {
+    const { stub } = await initSession({ userId: "user-1" });
+    const res = await stub.fetch("http://internal/internal/update-title", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "user-1", title: "a".repeat(201) }),
+    });
+    expect(res.status).toBe(400);
   });
 });
 

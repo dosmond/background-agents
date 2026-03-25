@@ -11,7 +11,9 @@ on:
       - "packages/github-bot/**"
       - "packages/linear-bot/**"
       - "packages/modal-infra/**"
+      - "packages/sandbox-runtime/**"
       - "packages/shared/**"
+      - "packages/web/**" # Web app deployed via Terraform when web_platform = "cloudflare"
       - ".github/workflows/terraform.yml"
   pull_request:
     branches: [main]
@@ -23,7 +25,9 @@ on:
       - "packages/github-bot/**"
       - "packages/linear-bot/**"
       - "packages/modal-infra/**"
+      - "packages/sandbox-runtime/**"
       - "packages/shared/**"
+      - "packages/web/**"
       - ".github/workflows/terraform.yml"
   workflow_dispatch: # Allow manual trigger
 
@@ -110,12 +114,20 @@ jobs:
 
             *Pushed by: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
 
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: output
-            });
+            try {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: output
+              });
+            } catch (error) {
+              if (error.status === 403) {
+                core.notice('Could not post PR comment — GITHUB_TOKEN has read-only access (expected for fork PRs).');
+              } else {
+                throw error;
+              }
+            }
 
   plan:
     name: Plan
@@ -180,6 +192,7 @@ jobs:
           TF_VAR_github_app_id: ${{ secrets.GH_APP_ID }}
           TF_VAR_github_app_private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
           TF_VAR_github_app_installation_id: ${{ secrets.GH_APP_INSTALLATION_ID }}
+          TF_VAR_enable_slack_bot: "${{ secrets.ENABLE_SLACK_BOT || 'true' }}"
           TF_VAR_slack_bot_token: ${{ secrets.SLACK_BOT_TOKEN }}
           TF_VAR_slack_signing_secret: ${{ secrets.SLACK_SIGNING_SECRET }}
           TF_VAR_anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -198,6 +211,8 @@ jobs:
           TF_VAR_linear_client_id: ${{ secrets.LINEAR_CLIENT_ID }}
           TF_VAR_linear_client_secret: ${{ secrets.LINEAR_CLIENT_SECRET }}
           TF_VAR_linear_webhook_secret: ${{ secrets.LINEAR_WEBHOOK_SECRET }}
+          TF_VAR_web_platform: "${{ secrets.WEB_PLATFORM || 'vercel' }}"
+          TF_VAR_enable_durable_object_bindings: "${{ secrets.ENABLE_DURABLE_OBJECT_BINDINGS || 'true' }}"
 
       - name: Post Plan Results
         uses: actions/github-script@v7
@@ -269,7 +284,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install Modal CLI and dependencies
-        run: pip install modal fastapi pydantic httpx PyJWT
+        run: |
+          pip install -e packages/sandbox-runtime
+          pip install modal fastapi pydantic httpx PyJWT
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -301,6 +318,7 @@ jobs:
           TF_VAR_github_app_id: ${{ secrets.GH_APP_ID }}
           TF_VAR_github_app_private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
           TF_VAR_github_app_installation_id: ${{ secrets.GH_APP_INSTALLATION_ID }}
+          TF_VAR_enable_slack_bot: "${{ secrets.ENABLE_SLACK_BOT || 'true' }}"
           TF_VAR_slack_bot_token: ${{ secrets.SLACK_BOT_TOKEN }}
           TF_VAR_slack_signing_secret: ${{ secrets.SLACK_SIGNING_SECRET }}
           TF_VAR_anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -319,6 +337,8 @@ jobs:
           TF_VAR_linear_client_id: ${{ secrets.LINEAR_CLIENT_ID }}
           TF_VAR_linear_client_secret: ${{ secrets.LINEAR_CLIENT_SECRET }}
           TF_VAR_linear_webhook_secret: ${{ secrets.LINEAR_WEBHOOK_SECRET }}
+          TF_VAR_web_platform: "${{ secrets.WEB_PLATFORM || 'vercel' }}"
+          TF_VAR_enable_durable_object_bindings: "${{ secrets.ENABLE_DURABLE_OBJECT_BINDINGS || 'true' }}"
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
 

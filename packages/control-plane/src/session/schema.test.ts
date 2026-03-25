@@ -50,7 +50,6 @@ describe("applyMigrations", () => {
     // No applied IDs → SELECT returns empty
     applyMigrations(mock.sql);
 
-    // Should have: CREATE TABLE + SELECT + migration execs + INSERT OR IGNORE
     const createTable = mock.calls.find((c) =>
       c.query.includes("CREATE TABLE IF NOT EXISTS _schema_migrations")
     );
@@ -118,7 +117,7 @@ describe("applyMigrations", () => {
   });
 
   it("swallows duplicate column errors from string migrations", () => {
-    // Seed PRAGMA data so function-based migrations (7, 20) skip their ALTER TABLE calls.
+    // Seed PRAGMA data so function-based migrations (7, 20, 24) skip their ALTER TABLE calls.
     // This isolates the test to only exercise string migration error handling via runMigration().
     mock.setData("PRAGMA table_info(participants)", [
       { name: "scm_refresh_token_encrypted" },
@@ -129,6 +128,8 @@ describe("applyMigrations", () => {
       { name: "scm_access_token_encrypted" },
       { name: "scm_token_expires_at" },
     ]);
+    // Migration 24 checks session columns — include base_branch so it skips the rename
+    mock.setData("PRAGMA table_info(session)", [{ name: "base_branch" }]);
     const originalExec = mock.sql.exec.bind(mock.sql);
     mock.sql.exec = (query: string, ...params: unknown[]): SqlResult => {
       if (query.includes("ALTER TABLE")) {

@@ -6,6 +6,7 @@ import {
   type IntegrationSettingsMap,
   type GitHubBotSettings,
   type LinearBotSettings,
+  type CodeServerSettings,
 } from "@open-inspect/shared";
 
 export class IntegrationSettingsValidationError extends Error {
@@ -179,6 +180,10 @@ export class IntegrationSettingsStore {
       this.validateLinearSettings(settings as LinearBotSettings);
     }
 
+    if (integrationId === "code-server") {
+      this.validateCodeServerSettings(settings as CodeServerSettings);
+    }
+
     return settings;
   }
 
@@ -200,6 +205,20 @@ export class IntegrationSettingsStore {
 
   private validateAndNormalizeGitHubSettings(settings: GitHubBotSettings): GitHubBotSettings {
     this.validateModelAndEffort(settings);
+
+    if (
+      settings.codeReviewInstructions !== undefined &&
+      typeof settings.codeReviewInstructions !== "string"
+    ) {
+      throw new IntegrationSettingsValidationError("codeReviewInstructions must be a string");
+    }
+
+    if (
+      settings.commentActionInstructions !== undefined &&
+      typeof settings.commentActionInstructions !== "string"
+    ) {
+      throw new IntegrationSettingsValidationError("commentActionInstructions must be a string");
+    }
 
     if (settings.allowedTriggerUsers !== undefined) {
       if (
@@ -241,6 +260,28 @@ export class IntegrationSettingsStore {
       typeof settings.emitToolProgressActivities !== "boolean"
     ) {
       throw new IntegrationSettingsValidationError("emitToolProgressActivities must be a boolean");
+    }
+
+    if (
+      settings.issueSessionInstructions !== undefined &&
+      typeof settings.issueSessionInstructions !== "string"
+    ) {
+      throw new IntegrationSettingsValidationError("issueSessionInstructions must be a string");
+    }
+
+    if (
+      typeof settings.issueSessionInstructions === "string" &&
+      settings.issueSessionInstructions.length > 10000
+    ) {
+      throw new IntegrationSettingsValidationError(
+        "issueSessionInstructions must be 10000 characters or fewer"
+      );
+    }
+  }
+
+  private validateCodeServerSettings(settings: CodeServerSettings): void {
+    if (settings.enabled !== undefined && typeof settings.enabled !== "boolean") {
+      throw new IntegrationSettingsValidationError("enabled must be a boolean");
     }
   }
 }

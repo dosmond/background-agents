@@ -1,13 +1,18 @@
 /**
- * Git utilities for commit attribution and branch management.
+ * Git utilities for branch management.
  */
-
-import type { GitUser } from "./types";
 
 /**
  * Branch naming convention for Open-Inspect sessions.
  */
 export const BRANCH_PREFIX = "open-inspect";
+
+/**
+ * Normalize a git branch name for consistent Open-Inspect branch handling.
+ */
+export function normalizeBranchName(branchName: string): string {
+  return branchName.trim().toLowerCase();
+}
 
 /**
  * Generate a branch name for a session.
@@ -18,7 +23,7 @@ export const BRANCH_PREFIX = "open-inspect";
  */
 export function generateBranchName(sessionId: string, _title?: string): string {
   // Use just session ID to keep it short and unique
-  return `${BRANCH_PREFIX}/${sessionId}`;
+  return normalizeBranchName(`${BRANCH_PREFIX}/${sessionId}`);
 }
 
 /**
@@ -29,43 +34,16 @@ export function generateBranchName(sessionId: string, _title?: string): string {
  */
 export function extractSessionIdFromBranch(branchName: string): string | null {
   const prefix = `${BRANCH_PREFIX}/`;
-  if (!branchName.startsWith(prefix)) {
+  const normalizedBranchName = normalizeBranchName(branchName);
+  if (!normalizedBranchName.startsWith(prefix)) {
     return null;
   }
-  return branchName.slice(prefix.length);
+  return normalizedBranchName.slice(prefix.length);
 }
 
 /**
  * Check if a branch name is an Open-Inspect branch.
  */
 export function isInspectBranch(branchName: string): boolean {
-  return branchName.startsWith(`${BRANCH_PREFIX}/`);
-}
-
-/**
- * Generate a commit message for automated commits.
- *
- * @param action - What was done (e.g., "Add", "Update", "Fix")
- * @param description - Description of the change
- * @param sessionId - Session ID for traceability
- * @returns Formatted commit message
- */
-export function generateCommitMessage(
-  action: string,
-  description: string,
-  sessionId: string
-): string {
-  return `${action}: ${description}\n\nCo-authored-by: Open-Inspect <open-inspect@noreply.github.com>\nSession-ID: ${sessionId}`;
-}
-
-/**
- * Git environment variables for subprocess.
- */
-export function getGitEnv(user: GitUser): Record<string, string> {
-  return {
-    GIT_AUTHOR_NAME: user.name,
-    GIT_AUTHOR_EMAIL: user.email,
-    GIT_COMMITTER_NAME: user.name,
-    GIT_COMMITTER_EMAIL: user.email,
-  };
+  return normalizeBranchName(branchName).startsWith(`${BRANCH_PREFIX}/`);
 }

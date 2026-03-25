@@ -18,15 +18,18 @@ import {
   evaluateSpawnDecision,
   evaluateInactivityTimeout,
   evaluateHeartbeatHealth,
+  evaluateConnectingTimeout,
   evaluateWarmDecision,
   DEFAULT_CIRCUIT_BREAKER_CONFIG,
   DEFAULT_SPAWN_CONFIG,
   DEFAULT_INACTIVITY_CONFIG,
   DEFAULT_HEARTBEAT_CONFIG,
+  DEFAULT_CONNECTING_TIMEOUT_CONFIG,
   type CircuitBreakerConfig,
   type SpawnConfig,
   type InactivityConfig,
   type HeartbeatConfig,
+  type ConnectingTimeoutConfig,
 } from "./decisions";
 import { extractProviderAndModel } from "../../utils/models";
 import { createLogger, type Logger } from "../../logger";
@@ -82,6 +85,10 @@ export interface SandboxStorage {
   resetCircuitBreaker(): void;
   /** Persist last spawn error */
   setLastSpawnError(error: string | null, timestamp: number | null): void;
+  /** Update code-server URL and (encrypted) password on the sandbox row */
+  updateSandboxCodeServer(url: string, password: string): void | Promise<void>;
+  /** Clear stale code-server URL and password (e.g. on sandbox teardown) */
+  clearSandboxCodeServer(): void;
 }
 
 /**
@@ -132,11 +139,10 @@ export interface SandboxLifecycleConfig {
   spawn: SpawnConfig;
   inactivity: InactivityConfig;
   heartbeat: HeartbeatConfig;
+  connectingTimeout: ConnectingTimeoutConfig;
   controlPlaneUrl: string;
   /** Default model ID used when the session has no model override. */
   model: string;
-  /** Sandbox lifetime in seconds. Passed to the sandbox provider on create/restore. */
-  sandboxTimeoutSeconds?: number;
   /** Session ID for log correlation. Optional — logs will omit sessionId if not provided. */
   sessionId?: string;
   /** Enables Cursor CLI path in sandboxes. Defaults to true. */
@@ -155,7 +161,25 @@ export const DEFAULT_LIFECYCLE_CONFIG: Omit<SandboxLifecycleConfig, "controlPlan
   spawn: DEFAULT_SPAWN_CONFIG,
   inactivity: DEFAULT_INACTIVITY_CONFIG,
   heartbeat: DEFAULT_HEARTBEAT_CONFIG,
+  connectingTimeout: DEFAULT_CONNECTING_TIMEOUT_CONFIG,
 };
+
+/** Child (agent-spawned) sessions get a shorter sandbox timeout. */
+const CHILD_SANDBOX_TIMEOUT_SECONDS = 3600; // 1 hour (vs default 2 hours)
+
+// ==================== Repo Image Lookup ====================
+
+/**
+ * Lookup interface for pre-built repo images.
+ * Returns the latest ready image for a repo, if any.
+ */
+export interface RepoImageLookup {
+  getLatestReady(
+    repoOwner: string,
+    repoName: string,
+    baseBranch?: string
+  ): Promise<{ provider_image_id: string; base_sha: string } | null>;
+}
 
 // ==================== Callbacks ====================
 
@@ -195,7 +219,8 @@ export class SandboxLifecycleManager {
     private readonly alarmScheduler: AlarmScheduler,
     private readonly idGenerator: IdGenerator,
     private readonly config: SandboxLifecycleConfig,
-    private readonly callbacks: LifecycleCallbacks = {}
+    private readonly callbacks: LifecycleCallbacks = {},
+    private readonly repoImageLookup?: RepoImageLookup
   ) {
     this.log = config.sessionId ? log.child({ session_id: config.sessionId }) : log;
   }
@@ -344,7 +369,37 @@ export class SandboxLifecycleManager {
       const mcpConfig = await this.storage.getMcpConfig();
       const { provider, model: modelId } = this.resolveProviderAndModel(session);
 
+      // Look up pre-built repo image (graceful fallback on failure)
+      let repoImageId: string | null = null;
+      let repoImageSha: string | null = null;
+      if (this.repoImageLookup) {
+        try {
+          const repoImage = await this.repoImageLookup.getLatestReady(
+            session.repo_owner,
+            session.repo_name,
+            session.base_branch
+          );
+          if (repoImage) {
+            repoImageId = repoImage.provider_image_id;
+            repoImageSha = repoImage.base_sha;
+            this.log.info("Using pre-built repo image", {
+              provider_image_id: repoImageId,
+              base_sha: repoImageSha,
+            });
+          }
+        } catch (e) {
+          this.log.warn("Failed to look up repo image, using base image", {
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+
+      // Child sessions get a shorter timeout
+      const timeoutSeconds =
+        session.spawn_source === "agent" ? CHILD_SANDBOX_TIMEOUT_SECONDS : undefined;
+
       // Create sandbox via provider
+      const codeServerEnabled = session.code_server_enabled === 1;
       const createConfig: CreateSandboxConfig = {
         sessionId,
         sandboxId: expectedSandboxId,
@@ -356,6 +411,11 @@ export class SandboxLifecycleManager {
         model: modelId,
         userEnvVars,
         mcpConfig,
+        repoImageId,
+        repoImageSha,
+        timeoutSeconds,
+        branch: session.base_branch,
+        codeServerEnabled,
       };
 
       const result = await this.provider.createSandbox(createConfig);
@@ -371,8 +431,18 @@ export class SandboxLifecycleManager {
         this.storage.updateSandboxModalObjectId(result.providerObjectId);
       }
 
+      // Store code-server details and push to connected clients
+      if (result.codeServerUrl && result.codeServerPassword) {
+        await this.storeAndBroadcastCodeServer(result.codeServerUrl, result.codeServerPassword);
+      }
+
       this.storage.updateSandboxStatus("connecting");
       this.broadcaster.broadcast({ type: "sandbox_status", status: "connecting" });
+
+      // Schedule connecting timeout watchdog — if the bridge doesn't connect
+      // within the allowed window, handleAlarm() will fail the sandbox.
+      // This alarm is naturally replaced by the inactivity alarm on successful connect.
+      await this.alarmScheduler.scheduleAlarm(Date.now() + this.config.connectingTimeout.timeoutMs);
 
       // Reset circuit breaker on successful spawn initiation
       this.storage.resetCircuitBreaker();
@@ -457,6 +527,11 @@ export class SandboxLifecycleManager {
       const mcpConfig = await this.storage.getMcpConfig();
       const { provider, model: modelId } = this.resolveProviderAndModel(session);
 
+      // Child sessions get a shorter timeout (same logic as doSpawn)
+      const timeoutSeconds =
+        session.spawn_source === "agent" ? CHILD_SANDBOX_TIMEOUT_SECONDS : undefined;
+
+      const codeServerEnabled = session.code_server_enabled === 1;
       const result = await this.provider.restoreFromSnapshot({
         snapshotImageId,
         sessionId: session.session_name || session.id,
@@ -469,7 +544,9 @@ export class SandboxLifecycleManager {
         model: modelId,
         userEnvVars,
         mcpConfig,
-        timeoutSeconds: this.config.sandboxTimeoutSeconds,
+        timeoutSeconds,
+        branch: session.base_branch,
+        codeServerEnabled,
       });
 
       if (result.success) {
@@ -484,8 +561,19 @@ export class SandboxLifecycleManager {
           this.storage.updateSandboxModalObjectId(result.providerObjectId);
         }
 
+        // Store code-server details and push to connected clients
+        if (result.codeServerUrl && result.codeServerPassword) {
+          await this.storeAndBroadcastCodeServer(result.codeServerUrl, result.codeServerPassword);
+        }
+
         this.storage.updateSandboxStatus("connecting");
         this.broadcaster.broadcast({ type: "sandbox_status", status: "connecting" });
+
+        // Schedule connecting timeout watchdog (same as doSpawn)
+        await this.alarmScheduler.scheduleAlarm(
+          Date.now() + this.config.connectingTimeout.timeoutMs
+        );
+
         this.broadcaster.broadcast({
           type: "sandbox_restored",
           message: "Session restored from snapshot",
@@ -623,7 +711,33 @@ export class SandboxLifecycleManager {
       return;
     }
 
-    // Check heartbeat health first
+    // Check connecting timeout — sandbox failed to connect within allowed time
+    const connectingResult = evaluateConnectingTimeout(
+      sandbox.status as SandboxStatus,
+      sandbox.created_at,
+      this.config.connectingTimeout,
+      now
+    );
+
+    if (connectingResult.isTimedOut) {
+      this.log.warn("Connecting timeout", {
+        event: "sandbox.connecting_timeout",
+        elapsed_ms: connectingResult.elapsedMs,
+        timeout_ms: this.config.connectingTimeout.timeoutMs,
+      });
+      await this.callbacks.onSandboxTerminating?.();
+      this.storage.updateSandboxStatus("failed");
+      this.storage.clearSandboxCodeServer();
+      this.broadcaster.broadcast({ type: "sandbox_status", status: "failed" });
+      this.broadcaster.broadcast({
+        type: "sandbox_error",
+        error:
+          "Sandbox failed to connect within the allowed time. It will be retried on your next message.",
+      });
+      return;
+    }
+
+    // Check heartbeat health
     const heartbeatHealth = evaluateHeartbeatHealth(
       sandbox.last_heartbeat,
       this.config.heartbeat,
@@ -643,6 +757,7 @@ export class SandboxLifecycleManager {
         this.log.error("Heartbeat snapshot failed", { error: e instanceof Error ? e : String(e) })
       );
       this.storage.updateSandboxStatus("stale");
+      this.storage.clearSandboxCodeServer();
       this.broadcaster.broadcast({ type: "sandbox_status", status: "stale" });
 
       // Best-effort shutdown: tell sandbox to exit cleanly (connection may already be dead).
@@ -678,6 +793,7 @@ export class SandboxLifecycleManager {
         await this.callbacks.onSandboxTerminating?.();
         // Set status to stopped FIRST to block reconnection attempts
         this.storage.updateSandboxStatus("stopped");
+        this.storage.clearSandboxCodeServer();
         this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });
 
         // Take snapshot
@@ -780,6 +896,23 @@ export class SandboxLifecycleManager {
    */
   private getConnectedClientCount(): number {
     return this.wsManager.getConnectedClientCount();
+  }
+
+  /**
+   * Store code-server details in the database and push to connected clients.
+   * Shared by doSpawn() and restoreFromSnapshot().
+   *
+   * The storage adapter may encrypt the password before persisting;
+   * the plaintext is broadcast over the already-authenticated WebSocket.
+   */
+  private async storeAndBroadcastCodeServer(url: string, password: string): Promise<void> {
+    this.log.info("Storing and broadcasting code-server info", { url });
+    await this.storage.updateSandboxCodeServer(url, password);
+    this.broadcaster.broadcast({
+      type: "code_server_info",
+      url,
+      password,
+    });
   }
 
   /**
