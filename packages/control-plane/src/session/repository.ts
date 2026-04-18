@@ -48,6 +48,7 @@ export interface WsClientMappingResult {
 export interface SandboxCircuitBreakerState {
   status: string;
   created_at: number;
+  modal_object_id: string | null;
   snapshot_image_id: string | null;
   spawn_failure_count: number | null;
   last_spawn_failure: number | null;
@@ -75,6 +76,7 @@ export interface UpsertSessionData {
   spawnSource?: SpawnSource;
   spawnDepth?: number;
   codeServerEnabled?: boolean;
+  sandboxSettings?: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -198,6 +200,11 @@ export interface SpawnSandboxData {
   modalSandboxId: string;
 }
 
+export interface ResumeSandboxData {
+  status: SandboxStatus;
+  createdAt: number;
+}
+
 /**
  * SqlStorage interface matching Cloudflare's SqlStorage.
  * Used to allow mock injection for testing.
@@ -250,10 +257,11 @@ export class SessionRepository {
          spawn_source,
          spawn_depth,
          code_server_enabled,
+         sandbox_settings,
          created_at,
          updated_at
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       data.id,
       data.sessionName,
       data.title,
@@ -272,6 +280,7 @@ export class SessionRepository {
       data.spawnSource ?? "user",
       data.spawnDepth ?? 0,
       data.codeServerEnabled ? 1 : 0,
+      data.sandboxSettings ?? null,
       data.createdAt,
       data.updatedAt
     );
@@ -341,6 +350,16 @@ export class SessionRepository {
     );
   }
 
+  addSessionCost(cost: number, updatedAt: number): void {
+    this.sql.exec(
+      `UPDATE session
+       SET total_cost = total_cost + ?, updated_at = ?
+       WHERE id = (SELECT id FROM session LIMIT 1)`,
+      cost,
+      updatedAt
+    );
+  }
+
   // === SANDBOX ===
   // Note: Each session DO has exactly one sandbox row, so update methods use
   // a subquery `WHERE id = (SELECT id FROM sandbox LIMIT 1)` to find it.
@@ -353,7 +372,7 @@ export class SessionRepository {
 
   getSandboxWithCircuitBreaker(): SandboxCircuitBreakerState | null {
     const result = this.sql.exec(
-      `SELECT status, created_at, snapshot_image_id, spawn_failure_count, last_spawn_failure FROM sandbox LIMIT 1`
+      `SELECT status, created_at, modal_object_id, snapshot_image_id, spawn_failure_count, last_spawn_failure FROM sandbox LIMIT 1`
     );
     const rows = this.rows<SandboxCircuitBreakerState>(result);
     return rows[0] ?? null;
@@ -390,6 +409,18 @@ export class SessionRepository {
       data.createdAt,
       data.authTokenHash,
       data.modalSandboxId
+    );
+  }
+
+  updateSandboxForResume(data: ResumeSandboxData): void {
+    this.sql.exec(
+      `UPDATE sandbox SET
+         status = ?,
+         created_at = ?,
+         last_heartbeat = NULL
+       WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
+      data.status,
+      data.createdAt
     );
   }
 
@@ -444,6 +475,39 @@ export class SessionRepository {
   clearSandboxCodeServer(): void {
     this.sql.exec(
       `UPDATE sandbox SET code_server_url = NULL, code_server_password = NULL WHERE id = (SELECT id FROM sandbox LIMIT 1)`
+    );
+  }
+
+  clearSandboxCodeServerUrl(): void {
+    this.sql.exec(
+      `UPDATE sandbox SET code_server_url = NULL WHERE id = (SELECT id FROM sandbox LIMIT 1)`
+    );
+  }
+
+  updateSandboxTunnelUrls(urls: Record<string, string>): void {
+    this.sql.exec(
+      `UPDATE sandbox SET tunnel_urls = ? WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
+      JSON.stringify(urls)
+    );
+  }
+
+  clearSandboxTunnelUrls(): void {
+    this.sql.exec(
+      `UPDATE sandbox SET tunnel_urls = NULL WHERE id = (SELECT id FROM sandbox LIMIT 1)`
+    );
+  }
+
+  updateSandboxTtyd(url: string, encryptedToken: string): void {
+    this.sql.exec(
+      `UPDATE sandbox SET ttyd_url = ?, ttyd_token = ? WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
+      url,
+      encryptedToken
+    );
+  }
+
+  clearSandboxTtyd(): void {
+    this.sql.exec(
+      `UPDATE sandbox SET ttyd_url = NULL, ttyd_token = NULL WHERE id = (SELECT id FROM sandbox LIMIT 1)`
     );
   }
 
@@ -559,6 +623,15 @@ export class SessionRepository {
   }
 
   // === MESSAGES ===
+
+  getActiveDurationMs(): number {
+    const result = this.sql.exec(
+      `SELECT COALESCE(SUM(completed_at - started_at), 0) as duration_ms
+       FROM messages
+       WHERE started_at IS NOT NULL AND completed_at IS NOT NULL`
+    );
+    return (result.one() as { duration_ms: number }).duration_ms;
+  }
 
   getMessageCount(): number {
     const result = this.sql.exec(`SELECT COUNT(*) as count FROM messages`);
@@ -806,6 +879,12 @@ export class SessionRepository {
   listArtifacts(): ArtifactRow[] {
     const result = this.sql.exec(`SELECT * FROM artifacts ORDER BY created_at DESC`);
     return this.rows<ArtifactRow>(result);
+  }
+
+  getArtifactById(artifactId: string): ArtifactRow | null {
+    const result = this.sql.exec(`SELECT * FROM artifacts WHERE id = ?`, artifactId);
+    const rows = this.rows<ArtifactRow>(result);
+    return rows[0] ?? null;
   }
 
   // === WS CLIENT MAPPING ===

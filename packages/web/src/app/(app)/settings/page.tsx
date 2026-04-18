@@ -10,11 +10,13 @@ import { DataControlsSettings } from "@/components/settings/data-controls-settin
 import { KeyboardShortcutsSettings } from "@/components/settings/keyboard-shortcuts-settings";
 import { IntegrationsSettings } from "@/components/settings/integrations-settings";
 import { ThemeSettings } from "@/components/settings/theme-settings";
+import { SandboxSettingsPage } from "@/components/settings/sandbox-settings";
 import { ImagesSettings } from "@/components/settings/images-settings";
 import { AppearanceSettings } from "@/components/settings/appearance-settings";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
 import { SidebarIcon, BackIcon } from "@/components/ui/icons";
 import { useIsMobile } from "@/hooks/use-media-query";
+import { supportsRepoImages } from "@/lib/sandbox-provider";
 
 const CATEGORY_LABELS: Record<SettingsCategory, string> = {
   secrets: "Secrets",
@@ -23,6 +25,7 @@ const CATEGORY_LABELS: Record<SettingsCategory, string> = {
   appearance: "Appearance",
   "keyboard-shortcuts": "Keyboard",
   "data-controls": "Data Controls",
+  sandbox: "Sandbox",
   integrations: "Integrations",
 };
 
@@ -33,6 +36,7 @@ const VALID_CATEGORIES = new Set<string>([
   "appearance",
   "keyboard-shortcuts",
   "data-controls",
+  "sandbox",
   "integrations",
 ]);
 
@@ -44,7 +48,11 @@ export default function SettingsPage() {
   const { isOpen, toggle } = useSidebarContext();
   const searchParams = useSearchParams();
   const tabParam = searchParams.get("tab");
-  const initialCategory = isValidCategory(tabParam) ? tabParam : "secrets";
+  const repoImagesEnabled = supportsRepoImages();
+  const initialCategory =
+    isValidCategory(tabParam) && (tabParam !== "images" || repoImagesEnabled)
+      ? tabParam
+      : "secrets";
   const [activeCategory, setActiveCategoryRaw] = useState<SettingsCategory>(initialCategory);
 
   function setActiveCategory(category: SettingsCategory) {
@@ -53,22 +61,26 @@ export default function SettingsPage() {
   }
   const isMobile = useIsMobile();
   const [mobileView, setMobileView] = useState<"list" | "detail">(
-    isValidCategory(tabParam) ? "detail" : "list"
+    isValidCategory(tabParam) && (tabParam !== "images" || repoImagesEnabled) ? "detail" : "list"
   );
 
   // Sync state when searchParams change via client-side navigation
   useEffect(() => {
-    if (isValidCategory(tabParam)) {
+    if (isValidCategory(tabParam) && (tabParam !== "images" || repoImagesEnabled)) {
       setActiveCategoryRaw(tabParam);
       setMobileView("detail");
+      return;
     }
-  }, [tabParam]);
+
+    setActiveCategoryRaw("secrets");
+    setMobileView("list");
+  }, [repoImagesEnabled, tabParam]);
 
   const content = (
     <>
       {activeCategory === "secrets" && <SecretsSettings />}
       {activeCategory === "models" && <ModelsSettings />}
-      {activeCategory === "images" && <ImagesSettings />}
+      {activeCategory === "images" && repoImagesEnabled && <ImagesSettings />}
       {activeCategory === "appearance" && (
         <div className="space-y-8">
           <ThemeSettings />
@@ -77,6 +89,7 @@ export default function SettingsPage() {
       )}
       {activeCategory === "keyboard-shortcuts" && <KeyboardShortcutsSettings />}
       {activeCategory === "data-controls" && <DataControlsSettings />}
+      {activeCategory === "sandbox" && <SandboxSettingsPage />}
       {activeCategory === "integrations" && <IntegrationsSettings />}
     </>
   );

@@ -51,6 +51,14 @@ describe("model utilities", () => {
       expect(isValidModel("openai/gpt-5.3-codex-spark")).toBe(true);
     });
 
+    it("accepts bare GPT model names via normalization", () => {
+      expect(isValidModel("gpt-5.4")).toBe(true);
+      expect(isValidModel("gpt-5.2")).toBe(true);
+      expect(isValidModel("gpt-5.2-codex")).toBe(true);
+      expect(isValidModel("gpt-5.3-codex")).toBe(true);
+      expect(isValidModel("gpt-5.3-codex-spark")).toBe(true);
+    });
+
     it("returns false for invalid models", () => {
       expect(isValidModel("gpt-4")).toBe(false);
       expect(isValidModel("claude-3-opus")).toBe(false);
@@ -208,6 +216,12 @@ describe("model utilities", () => {
       expect(getValidModelOrDefault("claude-sonnet-4-5")).toBe("anthropic/claude-sonnet-4-5");
       expect(getValidModelOrDefault("claude-opus-4-5")).toBe("anthropic/claude-opus-4-5");
       expect(getValidModelOrDefault("claude-opus-4-6")).toBe("anthropic/claude-opus-4-6");
+    });
+
+    it("normalizes bare GPT model names to prefixed format", () => {
+      expect(getValidModelOrDefault("gpt-5.4")).toBe("openai/gpt-5.4");
+      expect(getValidModelOrDefault("gpt-5.2")).toBe("openai/gpt-5.2");
+      expect(getValidModelOrDefault("gpt-5.2-codex")).toBe("openai/gpt-5.2-codex");
     });
 
     it("returns default for invalid model", () => {
@@ -423,8 +437,13 @@ describe("model utilities", () => {
       expect(normalizeModelId("openai/gpt-5.3-codex-spark")).toBe("openai/gpt-5.3-codex-spark");
     });
 
+    it("adds openai/ prefix to bare GPT models", () => {
+      expect(normalizeModelId("gpt-5.4")).toBe("openai/gpt-5.4");
+      expect(normalizeModelId("gpt-5.2")).toBe("openai/gpt-5.2");
+      expect(normalizeModelId("gpt-5.2-codex")).toBe("openai/gpt-5.2-codex");
+    });
+
     it("passes through unknown models without prefix", () => {
-      expect(normalizeModelId("gpt-4")).toBe("gpt-4");
       expect(normalizeModelId("invalid")).toBe("invalid");
       expect(normalizeModelId("")).toBe("");
     });

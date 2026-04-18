@@ -1,8 +1,10 @@
+import type { SessionArtifact } from "@open-inspect/shared";
 import { generateId } from "../auth/crypto";
 import type { Logger } from "../logger";
 import type { GitPushSpec } from "../source-control";
-import type { ArtifactType, SandboxEvent, ServerMessage } from "../types";
+import type { SandboxEvent, ServerMessage } from "../types";
 import { shouldPersistToolCallEvent } from "./event-persistence";
+import { assertArtifactType } from "./artifacts";
 import type { SessionRepository } from "./repository";
 import type { CallbackNotificationService } from "./callback-notification-service";
 import type { SessionWebSocketManager } from "./websocket-manager";
@@ -13,7 +15,7 @@ import {
 } from "./routing-policy";
 
 type PushResolver = { resolve: () => void; reject: (err: Error) => void };
-const VALID_ARTIFACT_TYPES: ArtifactType[] = ["pr", "screenshot", "preview", "branch", "recording"];
+type SandboxEventWithAck = SandboxEvent & { ackId?: string; cursorSessionId?: string };
 
 interface SessionSandboxEventProcessorDeps {
   ctx: DurableObjectState;
@@ -51,7 +53,7 @@ export class SessionSandboxEventProcessor {
 
   constructor(private readonly deps: SessionSandboxEventProcessorDeps) {}
 
-  async processSandboxEvent(event: SandboxEvent): Promise<void> {
+  async processSandboxEvent(event: SandboxEventWithAck): Promise<void> {
     if (event.type === "heartbeat" || event.type === "token") {
       this.deps.log.debug("Sandbox event", { event_type: event.type });
     } else if (event.type !== "execution_complete") {
@@ -60,7 +62,7 @@ export class SessionSandboxEventProcessor {
     const now = Date.now();
 
     // Extract ackId from the raw event (attached by bridge for critical events)
-    const ackId = (event as Record<string, unknown>).ackId as string | undefined;
+    const ackId = event.ackId;
 
     if (event.type === "heartbeat") {
       this.deps.repository.updateSandboxHeartbeat(now);
@@ -70,6 +72,48 @@ export class SessionSandboxEventProcessor {
     const eventMessageId = "messageId" in event ? event.messageId : null;
     const processingMessage = this.deps.repository.getProcessingMessage();
     const messageId = eventMessageId ?? processingMessage?.id ?? null;
+
+    if (event.type === "artifact") {
+      this.deps.updateLastActivity(now);
+
+      const artifactType = assertArtifactType(event.artifactType);
+      const artifactId =
+        typeof event.artifactId === "string" && event.artifactId.length > 0
+          ? event.artifactId
+          : generateId();
+      const augmentedEvent: Extract<SandboxEvent, { type: "artifact" }> = {
+        ...event,
+        artifactType,
+        artifactId,
+        messageId: messageId ?? undefined,
+      };
+      const artifact: SessionArtifact = {
+        id: artifactId,
+        type: artifactType,
+        url: event.url,
+        metadata: event.metadata ?? null,
+        createdAt: now,
+      };
+
+      this.deps.repository.createArtifact({
+        id: artifact.id,
+        type: artifact.type,
+        url: artifact.url,
+        metadata: artifact.metadata ? JSON.stringify(artifact.metadata) : null,
+        createdAt: now,
+      });
+      this.deps.repository.createEvent({
+        id: generateId(),
+        type: event.type,
+        data: JSON.stringify(augmentedEvent),
+        messageId,
+        createdAt: now,
+      });
+
+      this.deps.broadcast({ type: "artifact_created", artifact });
+      this.deps.broadcast({ type: "sandbox_event", event: augmentedEvent });
+      return;
+    }
 
     if (event.type === "token") {
       if (messageId) {
@@ -81,6 +125,14 @@ export class SessionSandboxEventProcessor {
 
     if (event.type === "step_start" || event.type === "step_finish") {
       this.deps.updateLastActivity(now);
+      if (
+        event.type === "step_finish" &&
+        typeof event.cost === "number" &&
+        Number.isFinite(event.cost) &&
+        event.cost > 0
+      ) {
+        this.deps.repository.addSessionCost(event.cost, now);
+      }
       this.deps.broadcast({ type: "sandbox_event", event });
       return;
     }
@@ -198,47 +250,6 @@ export class SessionSandboxEventProcessor {
       return;
     }
 
-    if (event.type === "artifact") {
-      if (!VALID_ARTIFACT_TYPES.includes(event.artifactType as ArtifactType)) {
-        this.deps.log.warn("Ignoring unsupported artifact type", {
-          artifact_type: event.artifactType,
-        });
-        this.deps.broadcast({ type: "sandbox_event", event });
-        return;
-      }
-
-      const artifactId = generateId();
-      const parsedMetadata = event.metadata ?? {};
-      const metadata = JSON.stringify(parsedMetadata);
-      const artifactUrl =
-        typeof event.url === "string" && event.url.trim().length > 0 ? event.url.trim() : null;
-      const prNumber =
-        event.artifactType === "pr" && typeof parsedMetadata.number === "number"
-          ? parsedMetadata.number
-          : undefined;
-
-      this.deps.repository.createArtifact({
-        id: artifactId,
-        type: event.artifactType as ArtifactType,
-        url: artifactUrl,
-        metadata,
-        createdAt: now,
-      });
-
-      this.deps.broadcast({
-        type: "artifact_created",
-        artifact: {
-          id: artifactId,
-          type: event.artifactType,
-          url: artifactUrl,
-          metadata: parsedMetadata,
-          prNumber,
-        },
-      });
-      this.deps.broadcast({ type: "sandbox_event", event });
-      return;
-    }
-
     this.deps.repository.createEvent({
       id: generateId(),
       type: event.type,
@@ -286,9 +297,9 @@ export class SessionSandboxEventProcessor {
       timeoutId = setTimeout(() => {
         if (this.pendingPushResolvers.has(normalizedBranch)) {
           this.pendingPushResolvers.delete(normalizedBranch);
-          reject(new Error("Push operation timed out after 180 seconds"));
+          reject(new Error("Push operation timed out after 360 seconds"));
         }
-      }, 180000);
+      }, 360000);
     });
 
     this.deps.log.info("Sending push command", { branch_name: branchName });

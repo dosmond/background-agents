@@ -22,7 +22,7 @@ from pathlib import Path
 
 import httpx
 
-from .constants import CODE_SERVER_PORT
+from .constants import CODE_SERVER_PORT, TTYD_PORT, TTYD_PROXY_PORT
 from .log_config import configure_logging, get_logger
 
 configure_logging()
@@ -50,11 +50,14 @@ class SandboxSupervisor:
     DEFAULT_SETUP_TIMEOUT_SECONDS = 300
     DEFAULT_START_TIMEOUT_SECONDS = 120
     CLONE_DEPTH_COMMITS = 100
+    SIDECAR_TIMEOUT_SECONDS = 5
 
     def __init__(self):
         self.opencode_process: asyncio.subprocess.Process | None = None
         self.bridge_process: asyncio.subprocess.Process | None = None
         self.code_server_process: asyncio.subprocess.Process | None = None
+        self.ttyd_process: asyncio.subprocess.Process | None = None
+        self.ttyd_proxy_process: asyncio.subprocess.Process | None = None
         self.shutdown_event = asyncio.Event()
         self.git_sync_complete = asyncio.Event()
         self.opencode_ready = asyncio.Event()
@@ -287,25 +290,66 @@ class SandboxSupervisor:
         if legacy_tool.exists():
             shutil.copy(legacy_tool, tool_dest / "create-pull-request.js")
 
-        # Copy all .js files from tools/ (including _-prefixed internal modules)
+        # Copy all .js files from tools/ — these must export tool() for OpenCode
         if tools_dir.exists():
             for tool_file in tools_dir.iterdir():
                 if tool_file.is_file() and tool_file.suffix == ".js":
                     shutil.copy(tool_file, tool_dest / tool_file.name)
 
-        # Node modules symlink
-        node_modules = opencode_dir / "node_modules"
-        global_modules = Path("/usr/lib/node_modules")
-        if not node_modules.exists() and global_modules.exists():
-            try:
-                node_modules.symlink_to(global_modules)
-            except Exception as e:
-                self.log.warn("opencode.symlink_error", exc=e)
+        # Copy pre-built deps (package.json, package-lock.json, node_modules)
+        # from the image staging directory.  This gives OpenCode a lockfile
+        # that matches the declared dependencies so Npm.install() finds
+        # everything in sync and skips arborist reify() entirely.
+        deps_cache = Path("/app/opencode-deps")
+        for name in ("package.json", "package-lock.json"):
+            src = deps_cache / name
+            dest = opencode_dir / name
+            if src.exists() and not dest.exists():
+                shutil.copy2(src, dest)
+        cached_modules = deps_cache / "node_modules"
+        local_modules = opencode_dir / "node_modules"
+        if cached_modules.is_dir() and not local_modules.exists():
+            shutil.copytree(cached_modules, local_modules, symlinks=True)
 
-        # Minimal package.json
-        package_json = opencode_dir / "package.json"
-        if not package_json.exists():
-            package_json.write_text('{"name": "opencode-tools", "type": "module"}')
+    def _install_bin_scripts(self) -> None:
+        """Install standalone CLI scripts into /usr/local/bin.
+
+        Scripts in bin/ are standalone CLIs (not OpenCode tool plugins) and must
+        NOT be placed in .opencode/tool/ — OpenCode would import() them during
+        tool discovery, executing module-level code with the parent process argv.
+        """
+        bin_dir = Path("/app/sandbox_runtime/bin")
+        if not bin_dir.is_dir():
+            return
+
+        for script in bin_dir.iterdir():
+            if script.is_file() and script.suffix == ".js":
+                dest = Path("/usr/local/bin") / script.stem
+                shutil.copy(script, dest)
+                dest.chmod(0o755)
+                self.log.info("bin.installed", script=script.stem)
+
+    def _install_skills(self, workdir: Path) -> None:
+        """Copy bundled Skills into the .opencode/skills directory."""
+        skills_dir = Path("/app/sandbox_runtime/skills")
+        if not skills_dir.is_dir():
+            return
+
+        skills_dest = workdir / ".opencode" / "skills"
+        installed_any = False
+
+        for skill_dir in skills_dir.iterdir():
+            skill_file = skill_dir / "SKILL.md"
+            if not skill_dir.is_dir() or not skill_file.exists():
+                continue
+
+            dest_dir = skills_dest / skill_dir.name
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy(skill_file, dest_dir / "SKILL.md")
+            installed_any = True
+
+        if installed_any:
+            self.log.info("opencode.skills_installed", skills_path=str(skills_dest))
 
     def _setup_openai_oauth(self) -> None:
         """Write OpenCode auth.json for ChatGPT OAuth if refresh token is configured."""
@@ -384,6 +428,98 @@ class SandboxSupervisor:
         except Exception as e:
             self.log.warn("code_server.log_forward_error", exc=e)
 
+    async def start_ttyd(self) -> None:
+        """Start ttyd web terminal if TERMINAL_ENABLED is set."""
+        if not os.environ.get("TERMINAL_ENABLED"):
+            self.log.info("ttyd.skip", reason="TERMINAL_ENABLED not set")
+            return
+
+        workdir = (
+            str(self.repo_path)
+            if self.repo_path and (self.repo_path / ".git").exists()
+            else "/workspace"
+        )
+
+        cmd = [
+            "ttyd",
+            "--port",
+            str(TTYD_PORT),
+            "--interface",
+            "127.0.0.1",  # localhost only — proxy is the only external gateway
+            "--writable",
+            "bash",
+        ]
+
+        self.log.info("ttyd.starting", port=TTYD_PORT, workdir=workdir)
+
+        self.ttyd_process = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=workdir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=os.environ.copy(),
+        )
+
+        asyncio.create_task(self._forward_ttyd_logs())
+        self.log.info("ttyd.started", pid=self.ttyd_process.pid)
+
+    async def start_ttyd_proxy(self) -> None:
+        """Start the JWT-authenticated reverse proxy in front of ttyd."""
+        if not os.environ.get("TERMINAL_ENABLED"):
+            return
+
+        cmd = ["bun", "run", "/app/sandbox_runtime/ttyd_proxy/server.ts"]
+
+        self.log.info("ttyd_proxy.starting", port=TTYD_PROXY_PORT)
+
+        self.ttyd_proxy_process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=os.environ.copy(),
+        )
+
+        asyncio.create_task(self._forward_ttyd_proxy_logs())
+        self.log.info("ttyd_proxy.started", pid=self.ttyd_proxy_process.pid)
+
+    async def _forward_ttyd_logs(self) -> None:
+        """Forward ttyd stdout to supervisor stdout."""
+        if not self.ttyd_process or not self.ttyd_process.stdout:
+            return
+
+        try:
+            async for line in self.ttyd_process.stdout:
+                self.log.info("ttyd.stdout", line=line.decode().rstrip())
+        except Exception as e:
+            self.log.warn("ttyd.log_forward_error", exc=e)
+
+    async def _forward_ttyd_proxy_logs(self) -> None:
+        """Forward ttyd proxy stdout to supervisor stdout."""
+        if not self.ttyd_proxy_process or not self.ttyd_proxy_process.stdout:
+            return
+
+        try:
+            async for line in self.ttyd_proxy_process.stdout:
+                self.log.info("ttyd_proxy.stdout", line=line.decode().rstrip())
+        except Exception as e:
+            self.log.warn("ttyd_proxy.log_forward_error", exc=e)
+
+    async def _wait_for_port(self, port: int, timeout_seconds: float | None = None) -> bool:
+        timeout_seconds = timeout_seconds or self.SIDECAR_TIMEOUT_SECONDS
+        """Wait for a service to start listening on a port. Returns True if ready."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while loop.time() < deadline:
+            try:
+                _, writer = await asyncio.open_connection("127.0.0.1", port)
+                writer.close()
+                await writer.wait_closed()
+                return True
+            except (ConnectionRefusedError, OSError):
+                await asyncio.sleep(0.1)
+        self.log.warn("port_readiness.timeout", port=port, timeout=timeout_seconds)
+        return False
+
     async def start_opencode(self) -> None:
         """Start OpenCode server with configuration."""
         self._setup_openai_oauth()
@@ -420,14 +556,16 @@ class SandboxSupervisor:
             workdir = self.repo_path
 
         self._install_tools(workdir)
+        self._install_skills(workdir)
+        self._install_bin_scripts()
 
         # Deploy codex auth proxy plugin if OpenAI OAuth is configured
         opencode_dir = workdir / ".opencode"
-        plugin_source = Path("/app/sandbox_runtime/plugins/codex-auth-plugin.ts")
+        plugin_source = Path("/app/sandbox_runtime/plugins/codex-auth-plugin.js")
         if plugin_source.exists() and os.environ.get("OPENAI_OAUTH_REFRESH_TOKEN"):
             plugin_dir = opencode_dir / "plugins"
             plugin_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy(plugin_source, plugin_dir / "codex-auth-plugin.ts")
+            shutil.copy(plugin_source, plugin_dir / "codex-auth-plugin.js")
             self.log.info("openai_oauth.plugin_deployed")
 
         env = {
@@ -571,6 +709,8 @@ class SandboxSupervisor:
         restart_count = 0
         bridge_restart_count = 0
         code_server_restart_count = 0
+        ttyd_restart_count = 0
+        ttyd_proxy_restart_count = 0
 
         while not self.shutdown_event.is_set():
             # Check OpenCode process
@@ -671,6 +811,48 @@ class SandboxSupervisor:
                         "code_server.max_restarts", restart_count=code_server_restart_count
                     )
                     self.code_server_process = None
+
+            # Check ttyd process (non-fatal, best-effort restart)
+            if self.ttyd_process and self.ttyd_process.returncode is not None:
+                ttyd_restart_count += 1
+                self.log.warn(
+                    "ttyd.crash",
+                    exit_code=self.ttyd_process.returncode,
+                    restart_count=ttyd_restart_count,
+                )
+
+                if ttyd_restart_count <= self.MAX_RESTARTS:
+                    delay = min(self.BACKOFF_BASE**ttyd_restart_count, self.BACKOFF_MAX)
+                    await asyncio.sleep(delay)
+                    try:
+                        await self.start_ttyd()
+                    except Exception as e:
+                        self.log.warn("ttyd.restart_failed", exc=e)
+                        self.ttyd_process = None
+                else:
+                    self.log.warn("ttyd.max_restarts", restart_count=ttyd_restart_count)
+                    self.ttyd_process = None
+
+            # Check ttyd proxy process (non-fatal, best-effort restart)
+            if self.ttyd_proxy_process and self.ttyd_proxy_process.returncode is not None:
+                ttyd_proxy_restart_count += 1
+                self.log.warn(
+                    "ttyd_proxy.crash",
+                    exit_code=self.ttyd_proxy_process.returncode,
+                    restart_count=ttyd_proxy_restart_count,
+                )
+
+                if ttyd_proxy_restart_count <= self.MAX_RESTARTS:
+                    delay = min(self.BACKOFF_BASE**ttyd_proxy_restart_count, self.BACKOFF_MAX)
+                    await asyncio.sleep(delay)
+                    try:
+                        await self.start_ttyd_proxy()
+                    except Exception as e:
+                        self.log.warn("ttyd_proxy.restart_failed", exc=e)
+                        self.ttyd_proxy_process = None
+                else:
+                    self.log.warn("ttyd_proxy.max_restarts", restart_count=ttyd_proxy_restart_count)
+                    self.ttyd_proxy_process = None
 
             await asyncio.sleep(1.0)
 
@@ -910,8 +1092,25 @@ class SandboxSupervisor:
                 await self.shutdown_event.wait()
                 return
 
-            # Phase 3.5: Start code-server (non-blocking, no health check needed)
-            await self.start_code_server()
+            # Phase 3.5: Start optional sidecars (best-effort, non-fatal)
+            for sidecar_name, starter in (
+                ("code_server", self.start_code_server),
+                ("ttyd", self.start_ttyd),
+            ):
+                try:
+                    await starter()
+                except Exception as e:
+                    self.log.warn(f"{sidecar_name}.start_failed", exc=e)
+
+            if self.ttyd_process is not None:
+                ttyd_ready = await self._wait_for_port(
+                    TTYD_PORT, timeout_seconds=self.SIDECAR_TIMEOUT_SECONDS
+                )
+                if ttyd_ready:
+                    try:
+                        await self.start_ttyd_proxy()
+                    except Exception as e:
+                        self.log.warn("ttyd_proxy.start_failed", exc=e)
 
             # Phase 4: Start OpenCode server (in repo directory)
             await self.start_opencode()
@@ -971,6 +1170,28 @@ class SandboxSupervisor:
                 await asyncio.wait_for(self.code_server_process.wait(), timeout=5.0)
             except TimeoutError:
                 self.code_server_process.kill()
+
+        # Terminate ttyd proxy first (it depends on ttyd)
+        if self.ttyd_proxy_process and self.ttyd_proxy_process.returncode is None:
+            self.log.info("ttyd_proxy.terminating")
+            self.ttyd_proxy_process.terminate()
+            try:
+                await asyncio.wait_for(
+                    self.ttyd_proxy_process.wait(), timeout=self.SIDECAR_TIMEOUT_SECONDS
+                )
+            except TimeoutError:
+                self.ttyd_proxy_process.kill()
+
+        # Terminate ttyd
+        if self.ttyd_process and self.ttyd_process.returncode is None:
+            self.log.info("ttyd.terminating")
+            self.ttyd_process.terminate()
+            try:
+                await asyncio.wait_for(
+                    self.ttyd_process.wait(), timeout=self.SIDECAR_TIMEOUT_SECONDS
+                )
+            except TimeoutError:
+                self.ttyd_process.kill()
 
         # Terminate OpenCode
         if self.opencode_process and self.opencode_process.returncode is None:

@@ -166,6 +166,9 @@ function createSandboxRow(modalSandboxId: string): SandboxRow {
     last_spawn_error_at: null,
     code_server_url: null,
     code_server_password: null,
+    tunnel_urls: null,
+    ttyd_url: null,
+    ttyd_token: null,
     created_at: Date.now(),
   };
 }
@@ -336,6 +339,47 @@ describe("SessionWebSocketManagerImpl", () => {
       manager.acceptAndSetSandboxSocket(ws, "sb-1");
 
       expect(manager.getSandboxSocket()).toBeNull();
+    });
+
+    it("returns null and closes zombie WS when sandbox status is stopped", () => {
+      const { manager, sockets, mockRepo } = createManager();
+      const ws = createFakeWebSocket();
+
+      // Simulate: sandbox was stopped (inactivity timeout) but WS close handshake
+      // didn't complete before hibernation, so the WS still appears OPEN.
+      sockets.set(ws, ["sandbox", "sid:sb-1"]);
+      const row = createSandboxRow("sb-1");
+      row.status = "stopped";
+      mockRepo.setSandbox(row);
+
+      expect(manager.getSandboxSocket()).toBeNull();
+      expect(ws.close).toHaveBeenCalledWith(1000, "Sandbox terminated");
+    });
+
+    it("returns null and closes zombie WS when sandbox status is stale", () => {
+      const { manager, sockets, mockRepo } = createManager();
+      const ws = createFakeWebSocket();
+
+      sockets.set(ws, ["sandbox", "sid:sb-1"]);
+      const row = createSandboxRow("sb-1");
+      row.status = "stale";
+      mockRepo.setSandbox(row);
+
+      expect(manager.getSandboxSocket()).toBeNull();
+      expect(ws.close).toHaveBeenCalledWith(1000, "Sandbox terminated");
+    });
+
+    it("returns null and closes zombie WS when sandbox status is failed", () => {
+      const { manager, sockets, mockRepo } = createManager();
+      const ws = createFakeWebSocket();
+
+      sockets.set(ws, ["sandbox", "sid:sb-1"]);
+      const row = createSandboxRow("sb-1");
+      row.status = "failed";
+      mockRepo.setSandbox(row);
+
+      expect(manager.getSandboxSocket()).toBeNull();
+      expect(ws.close).toHaveBeenCalledWith(1000, "Sandbox terminated");
     });
   });
 

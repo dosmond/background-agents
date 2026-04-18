@@ -7,6 +7,7 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
     SESSION: {} as DurableObjectNamespace,
     REPOS_CACHE: {} as KVNamespace,
     DB: {} as D1Database,
+    MEDIA_BUCKET: {} as R2Bucket,
     TOKEN_ENCRYPTION_KEY: "token-key",
     DEPLOYMENT_NAME: "test",
     ...overrides,

@@ -12,7 +12,14 @@
 # Provider Authentication
 # =============================================================================
 
-# Cloudflare API token with Workers, KV, R2, and D1 permissions
+# Cloudflare API token.
+# Required account permissions:
+#   - Workers Scripts: Edit
+#   - Workers KV Storage: Edit
+#   - Workers R2 Storage: Edit
+#   - D1: Edit
+# Optional if you manage Cloudflare routes/custom domains:
+#   - Workers Routes: Edit
 # Create at: https://dash.cloudflare.com/profile/api-tokens
 cloudflare_api_token = ""
 
@@ -27,21 +34,37 @@ cloudflare_account_id = ""
 cloudflare_worker_subdomain = ""
 
 # Vercel API token
+# Only required when web_platform = "vercel"
 # Create at: https://vercel.com/account/tokens
-vercel_api_token = ""
+# NOTE: Due to a Terraform provider limitation, the Vercel provider validates this
+# token even when web_platform = "cloudflare". If you're not using Vercel, leave
+# these commented out to use the built-in dummy defaults.
+# vercel_api_token = ""
 
 # Vercel team/account ID (found in Account Settings -> "Your ID")
 # Even personal accounts have an ID (usually starts with "team_")
-vercel_team_id = ""  # e.g., "team_xxxxxxxxxxxxxxxxxxxx"
+# vercel_team_id = ""  # e.g., "team_xxxxxxxxxxxxxxxxxxxx"
 
 # Modal API token
+# Only required when sandbox_provider = "modal"
 # Create at: https://modal.com/settings
 modal_token_id = ""
 modal_token_secret = ""
 
 # Modal workspace name (used in endpoint URLs)
+# Only required when sandbox_provider = "modal"
 # This is your Modal username/workspace (e.g., "myworkspace" in "https://myworkspace--app.modal.run")
 modal_workspace = ""
+
+# Daytona REST API
+# Only required when sandbox_provider = "daytona"
+# Create an API key at https://app.daytona.io with permissions:
+#   Sandboxes: Read, Write  |  Snapshots: Read, Write, Delete
+# Seed the base snapshot with packages/daytona-infra/src/bootstrap.py before enabling.
+daytona_api_url = ""           # e.g., "https://app.daytona.io/api"
+daytona_api_key = ""           # Requires Sandboxes (Read/Write) + Snapshots (Read/Write/Delete)
+daytona_base_snapshot = ""     # Name of the seeded Daytona snapshot
+# daytona_target = ""          # Optional Daytona target name
 
 # =============================================================================
 # GitHub App Credentials
@@ -135,6 +158,7 @@ repo_secrets_encryption_key = ""
 internal_callback_secret = ""
 
 # Modal API secret (for control plane -> Modal authentication)
+# Only required when sandbox_provider = "modal"
 # Generate with: openssl rand -hex 32
 modal_api_secret = ""
 
@@ -144,6 +168,11 @@ nextauth_secret = ""
 # =============================================================================
 # Configuration
 # =============================================================================
+
+# Sandbox backend for session execution
+# - "modal": existing Modal-based sandboxes with filesystem snapshot restore
+# - "daytona": direct Daytona REST API integration with stop/start resume
+sandbox_provider = "modal"
 
 # Unique deployment name (used in resource names and URLs)
 # IMPORTANT: This must be globally unique for Vercel URLs.
@@ -168,6 +197,12 @@ project_root = "../../../"
 
 enable_durable_object_bindings = false
 enable_service_bindings = false
+
+# Optional: override these only when an existing deployment needs to re-enter
+# Phase 1 for a later Durable Object migration. Fresh deployments can omit them.
+# control_plane_migration_tag = "v1"
+# control_plane_migration_old_tag = null
+# control_plane_new_sqlite_classes = []
 
 # =============================================================================
 # Access Control

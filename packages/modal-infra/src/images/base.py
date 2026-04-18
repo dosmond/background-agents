@@ -28,9 +28,13 @@ CODE_SERVER_VERSION = "4.109.5"
 # agent-browser version to install (pinned for reproducible images)
 AGENT_BROWSER_VERSION = "0.21.2"
 
+# ttyd version to install (pinned for reproducible images)
+TTYD_VERSION = "1.7.7"
+TTYD_SHA256 = "8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55"
+
 # Cache buster - change this to force Modal image rebuild
-# v45: keep Cursor/Doppler tooling and agent-browser/code-server runtime
-CACHE_BUSTER = "v45-agent-browser-doppler"
+# v47: preserve Cursor/Doppler tools and pre-build OpenCode plugin deps
+CACHE_BUSTER = "v47-agent-browser-doppler-prebuilt-deps"
 
 # Base image with all development tools
 base_image = (
@@ -125,6 +129,17 @@ base_image = (
         "echo 'fi' >> /etc/profile.d/doppler.sh",
         "chmod +x /etc/profile.d/doppler.sh",
     )
+    # Pre-build OpenCode plugin deps into a staging directory.
+    # At boot, _install_tools() copies these into .opencode/ so that
+    # OpenCode's Npm.install() finds package-lock.json in sync and skips
+    # the slow arborist reify() call that would otherwise block the first prompt.
+    .run_commands(
+        "mkdir -p /app/opencode-deps",
+        'echo \'{"name":"opencode-tools","type":"module",'
+        '"dependencies":{"@opencode-ai/plugin":"*"}}\''
+        " > /app/opencode-deps/package.json",
+        "cd /app/opencode-deps && npm install --ignore-scripts --no-audit --no-fund",
+    )
     # Install code-server for browser-based VS Code editing (direct .deb from GitHub releases)
     .run_commands(
         f"curl -fsSL -o /tmp/code-server.deb"
@@ -133,6 +148,15 @@ base_image = (
         "dpkg -i /tmp/code-server.deb",
         "rm /tmp/code-server.deb",
         "code-server --version",
+    )
+    # Install ttyd web terminal (direct binary from GitHub releases)
+    .run_commands(
+        f"curl -fsSL -o /usr/local/bin/ttyd"
+        f" https://github.com/tsl0922/ttyd/releases/download/{TTYD_VERSION}"
+        f"/ttyd.x86_64",
+        f'echo "{TTYD_SHA256}  /usr/local/bin/ttyd" | sha256sum -c -',
+        "chmod +x /usr/local/bin/ttyd",
+        "ttyd --version",
     )
     # Install agent-browser CLI and download Chromium
     .run_commands(

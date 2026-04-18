@@ -37,6 +37,13 @@ module "control_plane_worker" {
     }
   ]
 
+  r2_buckets = [
+    {
+      binding_name = "MEDIA_BUCKET"
+      bucket_name  = cloudflare_r2_bucket.media.name
+    }
+  ]
+
   service_bindings = concat(
     var.enable_slack_bot ? [
       {
@@ -54,27 +61,44 @@ module "control_plane_worker" {
 
   enable_service_bindings = var.enable_service_bindings
 
-  plain_text_bindings = [
-    { name = "GITHUB_CLIENT_ID", value = var.github_client_id },
-    { name = "WEB_APP_URL", value = local.web_app_url },
-    { name = "WORKER_URL", value = local.control_plane_url },
-    { name = "MODAL_WORKSPACE", value = var.modal_workspace },
-    { name = "DEPLOYMENT_NAME", value = var.deployment_name },
-  ]
+  plain_text_bindings = concat(
+    [
+      { name = "GITHUB_CLIENT_ID", value = var.github_client_id },
+      { name = "WEB_APP_URL", value = local.web_app_url },
+      { name = "WORKER_URL", value = local.control_plane_url },
+      { name = "DEPLOYMENT_NAME", value = var.deployment_name },
+      { name = "SANDBOX_PROVIDER", value = var.sandbox_provider },
+    ],
+    local.use_modal_backend ? [{ name = "MODAL_WORKSPACE", value = var.modal_workspace }] : [],
+    local.use_daytona_backend ? [
+      { name = "DAYTONA_API_URL", value = var.daytona_api_url },
+      { name = "DAYTONA_BASE_SNAPSHOT", value = var.daytona_base_snapshot },
+    ] : [],
+    local.use_daytona_backend && var.daytona_target != "" ? [
+      { name = "DAYTONA_TARGET", value = var.daytona_target },
+    ] : []
+  )
 
-  secrets = [
-    { name = "GITHUB_CLIENT_SECRET", value = var.github_client_secret },
-    { name = "TOKEN_ENCRYPTION_KEY", value = var.token_encryption_key },
-    { name = "REPO_SECRETS_ENCRYPTION_KEY", value = var.repo_secrets_encryption_key },
-    { name = "MODAL_TOKEN_ID", value = var.modal_token_id },
-    { name = "MODAL_TOKEN_SECRET", value = var.modal_token_secret },
-    { name = "MODAL_API_SECRET", value = var.modal_api_secret },
-    { name = "INTERNAL_CALLBACK_SECRET", value = var.internal_callback_secret },
-    # GitHub App credentials for /repos endpoint (listInstallationRepositories)
-    { name = "GITHUB_APP_ID", value = var.github_app_id },
-    { name = "GITHUB_APP_PRIVATE_KEY", value = var.github_app_private_key },
-    { name = "GITHUB_APP_INSTALLATION_ID", value = var.github_app_installation_id },
-  ]
+  secrets = concat(
+    [
+      { name = "GITHUB_CLIENT_SECRET", value = var.github_client_secret },
+      { name = "TOKEN_ENCRYPTION_KEY", value = var.token_encryption_key },
+      { name = "REPO_SECRETS_ENCRYPTION_KEY", value = var.repo_secrets_encryption_key },
+      { name = "INTERNAL_CALLBACK_SECRET", value = var.internal_callback_secret },
+      # GitHub App credentials for /repos endpoint (listInstallationRepositories)
+      { name = "GITHUB_APP_ID", value = var.github_app_id },
+      { name = "GITHUB_APP_PRIVATE_KEY", value = var.github_app_private_key },
+      { name = "GITHUB_APP_INSTALLATION_ID", value = var.github_app_installation_id },
+    ],
+    local.use_modal_backend ? [
+      { name = "MODAL_TOKEN_ID", value = var.modal_token_id },
+      { name = "MODAL_TOKEN_SECRET", value = var.modal_token_secret },
+      { name = "MODAL_API_SECRET", value = var.modal_api_secret },
+    ] : [],
+    local.use_daytona_backend ? [
+      { name = "DAYTONA_API_KEY", value = var.daytona_api_key },
+    ] : []
+  )
 
   durable_objects = [
     { binding_name = "SESSION", class_name = "SessionDO" },
@@ -85,11 +109,17 @@ module "control_plane_worker" {
 
   compatibility_date  = "2024-09-23"
   compatibility_flags = ["nodejs_compat"]
-  migration_tag       = "v2"
-  migration_old_tag   = "v1"
-  new_sqlite_classes  = ["SchedulerDO"]
+  migration_tag       = var.control_plane_migration_tag
+  migration_old_tag   = var.control_plane_migration_old_tag
+  new_sqlite_classes  = var.control_plane_new_sqlite_classes
 
   cron_triggers = ["* * * * *"]
 
-  depends_on = [null_resource.control_plane_build, module.session_index_kv, null_resource.d1_migrations, module.linear_bot_worker]
+  depends_on = [
+    null_resource.control_plane_build,
+    module.session_index_kv,
+    null_resource.d1_migrations,
+    module.linear_bot_worker,
+    module.daytona_infra,
+  ]
 }

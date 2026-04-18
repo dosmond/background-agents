@@ -5,6 +5,7 @@
  * enabling unit testing and future provider support.
  */
 
+import type { SandboxSettings } from "@open-inspect/shared";
 import type { CorrelationContext } from "../logger";
 
 /** Default sandbox lifetime in seconds (2 hours). */
@@ -21,6 +22,10 @@ export interface SandboxProviderCapabilities {
   supportsRestore: boolean;
   /** Whether the provider supports pre-warming sandboxes */
   supportsWarm: boolean;
+  /** Whether the provider can resume a previously stopped sandbox in place */
+  supportsPersistentResume?: boolean;
+  /** Whether the provider can stop a sandbox explicitly via API */
+  supportsExplicitStop?: boolean;
 }
 
 /**
@@ -61,6 +66,8 @@ export interface CreateSandboxConfig {
   branch?: string;
   /** Whether to enable code-server (browser-based editor) in the sandbox */
   codeServerEnabled?: boolean;
+  /** Sandbox settings (tunnel ports, etc.) resolved from integration settings */
+  sandboxSettings?: SandboxSettings;
 }
 
 /**
@@ -79,6 +86,10 @@ export interface CreateSandboxResult {
   codeServerUrl?: string;
   /** Code-server password (if available) */
   codeServerPassword?: string;
+  /** ttyd proxy tunnel URL (if available) */
+  ttydUrl?: string;
+  /** Tunnel URLs for extra ports (port -> URL mapping) */
+  tunnelUrls?: Record<string, string>;
 }
 
 /**
@@ -115,6 +126,8 @@ export interface RestoreConfig {
   correlation?: CorrelationContext;
   /** Whether to enable code-server (browser-based editor) in the sandbox */
   codeServerEnabled?: boolean;
+  /** Sandbox settings (tunnel ports, etc.) resolved from integration settings */
+  sandboxSettings?: SandboxSettings;
 }
 
 /**
@@ -133,6 +146,10 @@ export interface RestoreResult {
   codeServerUrl?: string;
   /** Code-server password (if available) */
   codeServerPassword?: string;
+  /** ttyd proxy tunnel URL (if available) */
+  ttydUrl?: string;
+  /** Tunnel URLs for extra ports (port -> URL mapping) */
+  tunnelUrls?: Record<string, string>;
 }
 
 /**
@@ -158,6 +175,70 @@ export interface SnapshotResult {
   /** Snapshot image ID if successful */
   imageId?: string;
   /** Error message if failed */
+  error?: string;
+}
+
+/**
+ * Configuration for resuming a previously stopped sandbox.
+ */
+export interface ResumeConfig {
+  /** Provider's internal object ID (e.g., Daytona sandbox ID) */
+  providerObjectId: string;
+  /** Session ID for context */
+  sessionId: string;
+  /** Control-plane logical sandbox ID used for bridge auth */
+  sandboxId: string;
+  /** Sandbox lifetime in seconds from control-plane policy */
+  timeoutSeconds?: number;
+  /** Whether code-server should be exposed */
+  codeServerEnabled?: boolean;
+  /** Sandbox settings (tunnel ports, etc.) resolved from integration settings */
+  sandboxSettings?: SandboxSettings;
+  /** Correlation context for downstream tracing */
+  correlation?: CorrelationContext;
+}
+
+/**
+ * Result of resuming a previously stopped sandbox.
+ */
+export interface ResumeResult {
+  /** Whether the resume succeeded */
+  success: boolean;
+  /** Provider's internal object ID, if it changed during recovery */
+  providerObjectId?: string;
+  /** Error message if resume failed */
+  error?: string;
+  /** Whether the caller should fall back to a fresh create */
+  shouldSpawnFresh?: boolean;
+  /** Code-server tunnel URL (if available) */
+  codeServerUrl?: string;
+  /** Code-server password (if available) */
+  codeServerPassword?: string;
+  /** Tunnel URLs for extra ports (port -> URL mapping) */
+  tunnelUrls?: Record<string, string>;
+}
+
+/**
+ * Configuration for explicitly stopping a sandbox.
+ */
+export interface StopConfig {
+  /** Provider's internal object ID (e.g., Daytona sandbox ID) */
+  providerObjectId: string;
+  /** Session ID for context */
+  sessionId: string;
+  /** Reason for the stop operation */
+  reason: string;
+  /** Correlation context for downstream tracing */
+  correlation?: CorrelationContext;
+}
+
+/**
+ * Result of explicitly stopping a sandbox.
+ */
+export interface StopResult {
+  /** Whether the stop succeeded */
+  success: boolean;
+  /** Error message if stop failed */
   error?: string;
 }
 
@@ -302,6 +383,13 @@ export interface SandboxProvider {
   restoreFromSnapshot?(config: RestoreConfig): Promise<RestoreResult>;
 
   /**
+   * Resume a previously stopped sandbox in place.
+   *
+   * Only available if `capabilities.supportsPersistentResume` is true.
+   */
+  resumeSandbox?(config: ResumeConfig): Promise<ResumeResult>;
+
+  /**
    * Take a filesystem snapshot of the sandbox.
    *
    * Only available if `capabilities.supportsSnapshots` is true.
@@ -311,4 +399,11 @@ export interface SandboxProvider {
    * @throws SandboxProviderError with errorType for error handling
    */
   takeSnapshot?(config: SnapshotConfig): Promise<SnapshotResult>;
+
+  /**
+   * Stop a sandbox explicitly via the provider API.
+   *
+   * Only available if `capabilities.supportsExplicitStop` is true.
+   */
+  stopSandbox?(config: StopConfig): Promise<StopResult>;
 }

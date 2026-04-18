@@ -17,6 +17,9 @@ vi.mock("../src/github-auth", () => ({
 
 vi.mock("../src/utils/internal", () => ({
   generateInternalToken: vi.fn().mockResolvedValue("test-internal-token"),
+  buildInternalAuthHeaders: vi.fn().mockResolvedValue({
+    Authorization: "Bearer test-internal-token",
+  }),
 }));
 
 vi.mock("../src/utils/integration-config", () => ({
@@ -472,7 +475,7 @@ describe("handleIssueComment", () => {
       },
     };
 
-    const result = await handleIssueComment(env, log, payload, "trace-2");
+    await handleIssueComment(env, log, payload, "trace-2");
 
     expect(postReaction).toHaveBeenCalledWith(
       "test-installation-token",

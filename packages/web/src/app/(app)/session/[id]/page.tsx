@@ -17,11 +17,15 @@ import { useSessionSocket } from "@/hooks/use-session-socket";
 import { SafeMarkdown } from "@/components/safe-markdown";
 import { ToolCallGroup } from "@/components/tool-call-group";
 import { ComposerSlashMenu } from "@/components/composer-slash-menu";
+import { ScreenshotArtifactCard } from "@/components/screenshot-artifact-card";
+import { MediaLightbox } from "@/components/media-lightbox";
 import { useSidebarContext } from "@/components/sidebar-layout";
 import {
   SessionRightSidebar,
   SessionRightSidebarContent,
 } from "@/components/session-right-sidebar";
+import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
+import { TerminalPanel } from "@/components/terminal-panel";
 import { ActionBar } from "@/components/action-bar";
 import { copyToClipboard, formatModelNameLower } from "@/lib/format";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
@@ -46,8 +50,7 @@ import {
 import { useEnabledModels } from "@/hooks/use-enabled-models";
 import { ReasoningEffortPills } from "@/components/reasoning-effort-pills";
 import { SessionGitDiffPanel } from "@/components/session-git-diff-panel";
-import type { SessionGitChangesResponse } from "@/types/session";
-import type { SandboxEvent } from "@/types/session";
+import type { Artifact, SessionGitChangesResponse, SandboxEvent } from "@/types/session";
 import {
   SidebarIcon,
   ModelIcon,
@@ -288,6 +291,7 @@ function SessionPageContent() {
   );
 
   const [prompt, setPrompt] = useState("");
+  const [selectedMediaArtifactId, setSelectedMediaArtifactId] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<string>(DEFAULT_MODEL);
   const [reasoningEffort, setReasoningEffort] = useState<string | undefined>(
     getDefaultReasoningEffort(DEFAULT_MODEL)
@@ -584,6 +588,8 @@ function SessionPageContent() {
       slashListId={slashListId}
       slashResultsAnnouncement={slashResultsAnnouncement}
       fallbackSessionInfo={fallbackSessionInfo}
+      selectedMediaArtifactId={selectedMediaArtifactId}
+      setSelectedMediaArtifactId={setSelectedMediaArtifactId}
     />
   );
 }
@@ -621,7 +627,7 @@ function SessionContent({
   stopExecution,
   handleArchive,
   handleUnarchive,
-  renameSession,
+  renameSession: _renameSession,
   loadingHistory,
   loadOlderEvents,
   modelOptions,
@@ -631,6 +637,8 @@ function SessionContent({
   slashListId,
   slashResultsAnnouncement,
   fallbackSessionInfo,
+  selectedMediaArtifactId,
+  setSelectedMediaArtifactId,
 }: {
   sessionId: string;
   sessionState: ReturnType<typeof useSessionSocket>["sessionState"];
@@ -673,11 +681,9 @@ function SessionContent({
   slashActiveIndex: number;
   slashListId: string;
   slashResultsAnnouncement: string;
-  fallbackSessionInfo: {
-    repoOwner: string | null;
-    repoName: string | null;
-    title: string | null;
-  };
+  fallbackSessionInfo: FallbackSessionInfo;
+  selectedMediaArtifactId: string | null;
+  setSelectedMediaArtifactId: (artifactId: string | null) => void;
 }) {
   const { isOpen, toggle } = useSidebarContext();
   const isBelowLg = useMediaQuery("(max-width: 1023px)");
@@ -700,6 +706,26 @@ function SessionContent({
   const sheetDragYRef = useRef(0);
   const detailsButtonRef = useRef<HTMLButtonElement>(null);
   const sheetTouchStartYRef = useRef<number | null>(null);
+
+  // Terminal panel state
+  const [terminalOpen, setTerminalOpen] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("terminal-visible") === "true";
+  });
+  const toggleTerminal = useCallback(() => {
+    setTerminalOpen((prev) => {
+      const next = !prev;
+      localStorage.setItem("terminal-visible", String(next));
+      return next;
+    });
+  }, []);
+  const closeTerminal = useCallback(() => {
+    setTerminalOpen(false);
+    localStorage.setItem("terminal-visible", "false");
+  }, []);
+  const ttydUrl = sessionState?.ttydUrl;
+  const ttydToken = sessionState?.ttydToken;
+  const showTerminal = !!(ttydUrl && ttydToken && terminalOpen && !isBelowLg);
 
   // Scroll pagination refs
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -870,6 +896,14 @@ function SessionContent({
   const groupedEvents = useMemo(() => dedupeAndGroupEvents(events), [events]);
   const persistedTitle = sessionState?.title || fallbackSessionInfo.title;
   const resolvedTitle = optimisticTitle || persistedTitle || fallbackRepoLabel;
+  const screenshotArtifacts = useMemo(
+    () => artifacts.filter((artifact) => artifact.type === "screenshot"),
+    [artifacts]
+  );
+  const selectedMediaArtifact = useMemo(
+    () => screenshotArtifacts.find((artifact) => artifact.id === selectedMediaArtifactId) ?? null,
+    [screenshotArtifacts, selectedMediaArtifactId]
+  );
   const showTimelineSkeleton = events.length === 0 && (connecting || replaying);
 
   useEffect(() => {
@@ -1100,45 +1134,67 @@ function SessionContent({
 
       {/* Main content */}
       <main className="flex-1 flex overflow-hidden">
-        {/* Event timeline */}
-        <div
-          ref={scrollContainerRef}
-          onScroll={handleScroll}
-          className="flex-1 overflow-y-auto overflow-x-hidden p-4"
-        >
-          <div className="max-w-3xl mx-auto space-y-2">
-            {/* Scroll sentinel for loading older history */}
-            <div ref={topSentinelRef} className="h-1" />
-            {loadingHistory && (
-              <div className="text-center text-muted-foreground text-sm py-2">Loading...</div>
-            )}
-            {showTimelineSkeleton ? (
-              <TimelineSkeleton />
-            ) : (
-              groupedEvents.map((group) =>
-                group.type === "tool_group" ? (
-                  <ToolCallGroup key={group.id} events={group.events} groupId={group.id} />
-                ) : (
-                  <EventItem
-                    key={group.id}
-                    event={group.event}
-                    currentParticipantId={currentParticipantId}
-                  />
-                )
-              )
-            )}
-            {isProcessing && <ThinkingIndicator />}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          <PanelGroup orientation="vertical" id="session-terminal">
+            {/* Chat / Event Timeline */}
+            <Panel defaultSize={showTerminal ? "70%" : "100%"} minSize="30%">
+              <div
+                ref={scrollContainerRef}
+                onScroll={handleScroll}
+                className="h-full overflow-y-auto overflow-x-hidden p-4"
+              >
+                <div className="max-w-3xl mx-auto space-y-2">
+                  {/* Scroll sentinel for loading older history */}
+                  <div ref={topSentinelRef} className="h-1" />
+                  {loadingHistory && (
+                    <div className="text-center text-muted-foreground text-sm py-2">Loading...</div>
+                  )}
+                  {showTimelineSkeleton ? (
+                    <TimelineSkeleton />
+                  ) : (
+                    groupedEvents.map((group) =>
+                      group.type === "tool_group" ? (
+                        <ToolCallGroup key={group.id} events={group.events} groupId={group.id} />
+                      ) : (
+                        <EventItem
+                          key={group.id}
+                          event={group.event}
+                          sessionId={sessionId}
+                          currentParticipantId={currentParticipantId}
+                          onOpenMedia={setSelectedMediaArtifactId}
+                        />
+                      )
+                    )
+                  )}
+                  {isProcessing && <ThinkingIndicator />}
 
-            <div ref={messagesEndRef} />
-          </div>
+                  <div ref={messagesEndRef} />
+                </div>
+              </div>
+            </Panel>
+
+            {/* Terminal panel — only rendered when URL + token available and open */}
+            {showTerminal && (
+              <>
+                <PanelResizeHandle className="h-1.5 bg-border-muted hover:bg-accent transition-colors cursor-row-resize" />
+                <Panel defaultSize="30%" minSize="15%" maxSize="70%">
+                  <TerminalPanel url={ttydUrl!} token={ttydToken!} onClose={closeTerminal} />
+                </Panel>
+              </>
+            )}
+          </PanelGroup>
         </div>
 
         {/* Right sidebar */}
         <SessionRightSidebar
+          sessionId={sessionId}
           sessionState={sessionState}
           participants={participants}
           events={events}
           artifacts={artifacts}
+          terminalOpen={terminalOpen}
+          onToggleTerminal={toggleTerminal}
+          onOpenMedia={setSelectedMediaArtifactId}
         />
       </main>
 
@@ -1186,10 +1242,14 @@ function SessionContent({
               </div>
               <div className="overflow-y-auto">
                 <SessionRightSidebarContent
+                  sessionId={sessionId}
                   sessionState={sessionState}
                   participants={participants}
                   events={events}
                   artifacts={artifacts}
+                  terminalOpen={terminalOpen}
+                  onToggleTerminal={toggleTerminal}
+                  onOpenMedia={setSelectedMediaArtifactId}
                 />
               </div>
             </div>
@@ -1214,10 +1274,14 @@ function SessionContent({
               </div>
               <div className="flex-1 overflow-y-auto">
                 <SessionRightSidebarContent
+                  sessionId={sessionId}
                   sessionState={sessionState}
                   participants={participants}
                   events={events}
                   artifacts={artifacts}
+                  terminalOpen={terminalOpen}
+                  onToggleTerminal={toggleTerminal}
+                  onOpenMedia={setSelectedMediaArtifactId}
                 />
               </div>
             </div>
@@ -1239,6 +1303,17 @@ function SessionContent({
           onRefresh={fetchGitChanges}
         />
       )}
+
+      <MediaLightbox
+        sessionId={sessionId}
+        artifact={selectedMediaArtifact}
+        open={selectedMediaArtifactId !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSelectedMediaArtifactId(null);
+          }
+        }}
+      />
 
       {/* Input */}
       <footer className="border-t border-border-muted flex-shrink-0">
@@ -1531,10 +1606,14 @@ function ParticipantsList({
 
 const EventItem = memo(function EventItem({
   event,
+  sessionId,
   currentParticipantId,
+  onOpenMedia,
 }: {
   event: SandboxEvent;
+  sessionId: string;
   currentParticipantId: string | null;
+  onOpenMedia: (artifactId: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1684,6 +1763,24 @@ const EventItem = memo(function EventItem({
           </div>
         );
       }
+
+      if (event.artifactType === "screenshot" && event.artifactId) {
+        return (
+          <div className="space-y-2 border border-border-muted bg-card p-4">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted-foreground">Screenshot</span>
+              <span className="text-xs text-secondary-foreground">{time}</span>
+            </div>
+            <ScreenshotArtifactCard
+              sessionId={sessionId}
+              artifactId={event.artifactId}
+              metadata={event.metadata as Artifact["metadata"] | undefined}
+              onOpen={onOpenMedia}
+            />
+          </div>
+        );
+      }
+
       return (
         <div className="bg-card p-4 space-y-1">
           <div className="flex items-center justify-between">

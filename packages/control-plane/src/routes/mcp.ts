@@ -14,6 +14,7 @@ import {
   parsePattern,
   json,
   error,
+  createRouteSourceControlProvider,
   resolveInstalledRepo,
 } from "./shared";
 
@@ -90,7 +91,8 @@ async function handleSetRepoMcpConfig(
 
   let resolved;
   try {
-    resolved = await resolveInstalledRepo(env, owner, name);
+    const provider = createRouteSourceControlProvider(env);
+    resolved = await resolveInstalledRepo(provider, owner, name);
     if (!resolved) return error("Repository is not installed for the GitHub App", 404);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -195,7 +197,8 @@ async function handleValidateRepoMcpConfig(
 
   let resolved;
   try {
-    resolved = await resolveInstalledRepo(env, owner, name);
+    const provider = createRouteSourceControlProvider(env);
+    resolved = await resolveInstalledRepo(provider, owner, name);
     if (!resolved) return error("Repository is not installed for the GitHub App", 404);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);

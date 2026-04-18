@@ -232,7 +232,7 @@ describe("ModalSandboxProvider", () => {
             throw new Error("Modal API error: 429 Too Many Requests");
           }),
         });
-        const provider = new ModalSandboxProvider(client, "test-secret");
+        const provider = new ModalSandboxProvider(client);
 
         try {
           await provider.createSandbox(testConfig);
@@ -597,7 +597,7 @@ describe("ModalSandboxProvider", () => {
       }) as unknown as typeof fetch;
 
       const client = createMockModalClient();
-      const provider = new ModalSandboxProvider(client, "test-secret");
+      const provider = new ModalSandboxProvider(client);
 
       await provider.restoreFromSnapshot({
         snapshotImageId: "img-123",

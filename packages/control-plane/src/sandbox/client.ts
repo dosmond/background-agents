@@ -5,7 +5,7 @@
  * All requests are authenticated using HMAC-signed tokens.
  */
 
-import { generateInternalToken } from "@open-inspect/shared";
+import { generateInternalToken, type SandboxSettings } from "@open-inspect/shared";
 import { createLogger } from "../logger";
 import type { CorrelationContext } from "../logger";
 
@@ -40,6 +40,7 @@ export interface CreateSandboxRequest {
   timeoutSeconds?: number;
   branch?: string;
   codeServerEnabled?: boolean;
+  sandboxSettings?: SandboxSettings;
 }
 
 export interface CreateSandboxResponse {
@@ -49,6 +50,8 @@ export interface CreateSandboxResponse {
   createdAt: number;
   codeServerUrl?: string;
   codeServerPassword?: string;
+  ttydUrl?: string;
+  tunnelUrls?: Record<string, string>;
 }
 
 export interface RestoreSandboxRequest {
@@ -66,6 +69,7 @@ export interface RestoreSandboxRequest {
   timeoutSeconds?: number;
   branch?: string;
   codeServerEnabled?: boolean;
+  sandboxSettings?: SandboxSettings;
 }
 
 export interface RestoreSandboxResponse {
@@ -75,6 +79,8 @@ export interface RestoreSandboxResponse {
   error?: string;
   codeServerUrl?: string;
   codeServerPassword?: string;
+  ttydUrl?: string;
+  tunnelUrls?: Record<string, string>;
 }
 
 export interface SnapshotSandboxRequest {
@@ -288,6 +294,7 @@ export class ModalClient {
           timeout_seconds: request.timeoutSeconds || null,
           branch: request.branch || null,
           code_server_enabled: request.codeServerEnabled ?? false,
+          sandbox_settings: request.sandboxSettings ?? null,
         }),
       });
 
@@ -305,6 +312,8 @@ export class ModalClient {
         created_at: number;
         code_server_url?: string;
         code_server_password?: string;
+        ttyd_url?: string;
+        tunnel_urls?: Record<string, string>;
       }>;
 
       if (!result.success || !result.data) {
@@ -319,6 +328,8 @@ export class ModalClient {
         createdAt: result.data.created_at,
         codeServerUrl: result.data.code_server_url,
         codeServerPassword: result.data.code_server_password,
+        ttydUrl: result.data.ttyd_url,
+        tunnelUrls: result.data.tunnel_urls,
       };
     } finally {
       log.info("modal.request", {
@@ -369,6 +380,7 @@ export class ModalClient {
           mcp_config: request.mcpConfig || null,
           timeout_seconds: request.timeoutSeconds || null,
           code_server_enabled: request.codeServerEnabled ?? false,
+          sandbox_settings: request.sandboxSettings ?? null,
         }),
       });
 
@@ -384,6 +396,8 @@ export class ModalClient {
         modal_object_id?: string;
         code_server_url?: string;
         code_server_password?: string;
+        ttyd_url?: string;
+        tunnel_urls?: Record<string, string>;
       }>;
 
       if (!result.success) {
@@ -397,6 +411,8 @@ export class ModalClient {
         modalObjectId: result.data?.modal_object_id,
         codeServerUrl: result.data?.code_server_url,
         codeServerPassword: result.data?.code_server_password,
+        ttydUrl: result.data?.ttyd_url,
+        tunnelUrls: result.data?.tunnel_urls,
       };
     } finally {
       log.info("modal.request", {

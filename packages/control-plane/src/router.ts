@@ -2,9 +2,20 @@
  * API router for Open-Inspect Control Plane.
  */
 
-import type { Env, CreateSessionRequest, CreateSessionResponse } from "./types";
+import type { ArtifactResponse, Env, CreateSessionRequest, CreateSessionResponse } from "./types";
 import { generateId, encryptToken } from "./auth/crypto";
 import { verifyInternalToken } from "./auth/internal";
+import {
+  buildMediaObjectKey,
+  detectScreenshotFileType,
+  isMultipartFile,
+  isSupportedScreenshotMimeType,
+  type MultipartFieldValue,
+  parseOptionalBoolean,
+  parseOptionalViewport,
+  SCREENSHOT_MAX_BYTES,
+  SCREENSHOT_UPLOAD_LIMIT_PER_SESSION,
+} from "./media";
 import {
   resolveScmProviderFromEnv,
   SourceControlProviderError,
@@ -17,8 +28,12 @@ import { buildSessionInternalUrl, SessionInternalPaths } from "./session/contrac
 
 import {
   getValidModelOrDefault,
+  isValidModel,
   isValidReasoningEffort,
+  VALID_MODELS,
   type CodeServerSettings,
+  type SandboxSettings,
+  type ScreenshotArtifactMetadata,
   type SessionStatus,
   type CallbackContext,
   type SpawnChildSessionRequest,
@@ -32,8 +47,7 @@ import {
   parsePattern,
   json,
   error,
-  createRouteSourceControlProvider,
-  resolveInstalledRepo,
+  resolveRepoOrError,
 } from "./routes/shared";
 import { integrationSettingsRoutes } from "./routes/integration-settings";
 import { modelPreferencesRoutes } from "./routes/model-preferences";
@@ -45,6 +59,8 @@ import { sessionFoldersRoutes } from "./routes/session-folders";
 import { repoImageRoutes } from "./routes/repo-images";
 import { secretsRoutes } from "./routes/secrets";
 import { automationRoutes } from "./routes/automations";
+import { analyticsRoutes } from "./routes/analytics";
+import { webhookRoutes } from "./webhooks";
 
 const logger = createLogger("router");
 
@@ -77,6 +93,30 @@ async function resolveCodeServerEnabled(
       error: e instanceof Error ? e.message : String(e),
     });
     return false;
+  }
+}
+
+/**
+ * Resolve sandbox settings for a given repo, merging global defaults with per-repo overrides.
+ */
+async function resolveSandboxSettings(
+  db: D1Database | undefined,
+  repoOwner: string,
+  repoName: string
+): Promise<SandboxSettings> {
+  if (!db) return {};
+  const repo = `${repoOwner}/${repoName}`;
+  try {
+    const store = new IntegrationSettingsStore(db);
+    const { enabledRepos, settings } = await store.getResolvedConfig("sandbox", repo);
+    // enabledRepos: null → all repos, [] → none, [...] → allowlist
+    if (enabledRepos !== null && !enabledRepos.includes(repo)) return {};
+    return settings as SandboxSettings;
+  } catch (e) {
+    logger.warn("Failed to resolve sandbox settings, using defaults", {
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return {};
   }
 }
 
@@ -132,7 +172,11 @@ function getSessionStub(env: Env, match: RegExpMatchArray): DurableObjectStub | 
 /**
  * Routes that do not require authentication.
  */
-const PUBLIC_ROUTES: RegExp[] = [/^\/health$/];
+const PUBLIC_ROUTES: RegExp[] = [
+  /^\/health$/,
+  /^\/webhooks\/sentry\/[^/]+$/,
+  /^\/webhooks\/automation\/[^/]+$/,
+];
 
 /**
  * Routes that accept sandbox authentication.
@@ -143,6 +187,7 @@ const SANDBOX_AUTH_ROUTES: RegExp[] = [
   /^\/sessions\/[^/]+\/pr$/, // PR creation from sandbox
   /^\/sessions\/[^/]+\/openai-token-refresh$/, // OpenAI token refresh from sandbox
   /^\/sessions\/[^/]+\/artifacts\/upload$/, // Artifact uploads from sandbox
+  /^\/sessions\/[^/]+\/media$/, // Media upload from sandbox
   /^\/sessions\/[^/]+\/children$/, // POST spawn, GET list
   /^\/sessions\/[^/]+\/children\/[^/]+$/, // GET child detail
   /^\/sessions\/[^/]+\/children\/[^/]+\/cancel$/, // POST cancel child
@@ -204,6 +249,10 @@ function isSandboxAuthRoute(path: string): boolean {
   return SANDBOX_AUTH_ROUTES.some((pattern) => pattern.test(path));
 }
 
+function isScmAgnosticRoute(path: string): boolean {
+  return /^\/analytics\/(summary|timeseries|breakdown)$/.test(path);
+}
+
 function enforceImplementedScmProvider(
   path: string,
   env: Env,
@@ -211,7 +260,7 @@ function enforceImplementedScmProvider(
 ): Response | null {
   try {
     const provider = resolveDeploymentScmProvider(env);
-    if (provider !== "github" && !isPublicRoute(path)) {
+    if (provider !== "github" && !isPublicRoute(path) && !isScmAgnosticRoute(path)) {
       logger.warn("SCM provider not implemented", {
         event: "scm.provider_not_implemented",
         scm_provider: provider,
@@ -439,6 +488,16 @@ const routes: Route[] = [
   },
   {
     method: "POST",
+    pattern: parsePattern("/sessions/:id/media"),
+    handler: handleMediaUpload,
+  },
+  {
+    method: "GET",
+    pattern: parsePattern("/sessions/:id/media/:artifactId"),
+    handler: handleMediaGet,
+  },
+  {
+    method: "POST",
     pattern: parsePattern("/sessions/:id/openai-token-refresh"),
     handler: handleOpenAITokenRefresh,
   },
@@ -514,6 +573,12 @@ const routes: Route[] = [
 
   // Automations
   ...automationRoutes,
+
+  // Analytics
+  ...analyticsRoutes,
+
+  // Webhooks (public routes — auth handled per-route)
+  ...webhookRoutes,
 ];
 
 /**
@@ -699,27 +764,10 @@ async function handleCreateSession(
   const repoOwner = body.repoOwner.toLowerCase();
   const repoName = body.repoName.toLowerCase();
 
-  let repoId: number;
-  let defaultBranch: string;
-  try {
-    const provider = createRouteSourceControlProvider(env);
-    const resolved = await resolveInstalledRepo(provider, repoOwner, repoName);
-    if (!resolved) {
-      return error("Repository is not installed for the GitHub App", 404);
-    }
-    repoId = resolved.repoId;
-    defaultBranch = resolved.defaultBranch;
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    logger.error("Failed to resolve repository", {
-      error: message,
-      repo_owner: repoOwner,
-      repo_name: repoName,
-    });
-    const isConfigError =
-      e instanceof SourceControlProviderError && e.errorType === "permanent" && !e.httpStatus;
-    return error(isConfigError ? message : "Failed to resolve repository", 500);
-  }
+  const resolved = await resolveRepoOrError(env, repoOwner, repoName, ctx, logger);
+  if (resolved instanceof Response) return resolved;
+
+  const { repoId, defaultBranch } = resolved;
 
   const userId = body.userId || "anonymous";
   const scmLogin = body.scmLogin;
@@ -768,8 +816,11 @@ async function handleCreateSession(
       ? body.reasoningEffort
       : null;
 
-  // Resolve code-server integration setting for this repo
-  const codeServerEnabled = await resolveCodeServerEnabled(env.DB, repoOwner, repoName);
+  // Resolve code-server integration setting and sandbox settings for this repo
+  const [codeServerEnabled, sandboxSettings] = await Promise.all([
+    resolveCodeServerEnabled(env.DB, repoOwner, repoName),
+    resolveSandboxSettings(env.DB, repoOwner, repoName),
+  ]);
 
   // Initialize session with user info and optional encrypted token
   const initResponse = await stub.fetch(
@@ -797,6 +848,7 @@ async function handleCreateSession(
           scmTokenExpiresAt,
           scmUserId,
           codeServerEnabled,
+          sandboxSettings,
         }),
       },
       ctx
@@ -837,6 +889,7 @@ async function handleCreateSession(
     reasoningEffort,
     baseBranch: body.branch || defaultBranch || "main",
     status: "created",
+    scmLogin: scmLogin || null,
     createdAt: now,
     updatedAt: now,
   });
@@ -1002,6 +1055,76 @@ async function handleSessionArtifacts(
   );
 }
 
+function getRequiredFormString(value: MultipartFieldValue | null, name: string): string | Response {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return error(`${name} is required`, 400);
+  }
+
+  return value.trim();
+}
+
+function getOptionalFormString(value: MultipartFieldValue | null): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+async function listSessionArtifactsFromDo(
+  stub: DurableObjectStub,
+  ctx: RequestContext
+): Promise<ArtifactResponse[] | Response> {
+  const response = await stub.fetch(
+    internalRequest(buildSessionInternalUrl(SessionInternalPaths.artifacts), undefined, ctx)
+  );
+  if (!response.ok) {
+    return response.status === 404
+      ? error("Session not found", 404)
+      : error("Failed to list session artifacts", 500);
+  }
+
+  const data = (await response.json()) as { artifacts: ArtifactResponse[] };
+  return data.artifacts;
+}
+
+async function getSessionArtifactFromDo(
+  stub: DurableObjectStub,
+  artifactId: string,
+  ctx: RequestContext
+): Promise<ArtifactResponse | null | Response> {
+  const response = await stub.fetch(
+    internalRequest(
+      buildSessionInternalUrl(
+        SessionInternalPaths.artifacts,
+        `?artifactId=${encodeURIComponent(artifactId)}`
+      ),
+      undefined,
+      ctx
+    )
+  );
+  if (!response.ok) {
+    return response.status === 404
+      ? error("Session not found", 404)
+      : error("Failed to fetch session artifact", 500);
+  }
+
+  const data = (await response.json()) as { artifact: ArtifactResponse | null };
+  return data.artifact;
+}
+
+function getScreenshotMimeType(
+  artifact: Pick<ArtifactResponse, "metadata">
+): "image/png" | "image/jpeg" | "image/webp" | null {
+  const mimeType = artifact.metadata?.mimeType;
+  return typeof mimeType === "string" && isSupportedScreenshotMimeType(mimeType) ? mimeType : null;
+}
+
+function getContentTypeFromHeaders(
+  headers: Headers
+): "image/png" | "image/jpeg" | "image/webp" | null {
+  const contentType = headers.get("Content-Type");
+  return contentType && isSupportedScreenshotMimeType(contentType) ? contentType : null;
+}
+
 async function handleSessionArtifactUpload(
   request: Request,
   env: Env,
@@ -1051,6 +1174,183 @@ async function handleSessionArtifactUpload(
   );
 }
 
+async function handleMediaUpload(
+  request: Request,
+  env: Env,
+  match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  const sessionId = match.groups?.id;
+  if (!sessionId) return error("Session ID required");
+
+  let formData: FormData;
+  try {
+    formData = await request.formData();
+  } catch {
+    return error("Invalid multipart form data", 400);
+  }
+
+  const fileEntry = formData.get("file");
+  if (!isMultipartFile(fileEntry)) {
+    return error("file is required", 400);
+  }
+
+  const artifactTypeField = getRequiredFormString(formData.get("artifactType"), "artifactType");
+  if (artifactTypeField instanceof Response) return artifactTypeField;
+  if (artifactTypeField !== "screenshot") {
+    return error("Only screenshot uploads are supported", 400);
+  }
+
+  if (fileEntry.size <= 0) {
+    return error("Uploaded file is empty", 400);
+  }
+
+  if (fileEntry.size > SCREENSHOT_MAX_BYTES) {
+    return error(`Screenshot uploads must be ${SCREENSHOT_MAX_BYTES} bytes or smaller`, 400);
+  }
+
+  if (
+    fileEntry.type &&
+    fileEntry.type !== "image/png" &&
+    fileEntry.type !== "image/jpeg" &&
+    fileEntry.type !== "image/webp"
+  ) {
+    return error("Unsupported screenshot MIME type", 400);
+  }
+
+  let fullPage: boolean | undefined;
+  let annotated: boolean | undefined;
+  let viewport: { width: number; height: number } | undefined;
+  try {
+    fullPage = parseOptionalBoolean(formData.get("fullPage"));
+    annotated = parseOptionalBoolean(formData.get("annotated"));
+    viewport = parseOptionalViewport(formData.get("viewport"));
+  } catch (fieldError) {
+    return error(
+      fieldError instanceof Error ? fieldError.message : "Invalid screenshot metadata",
+      400
+    );
+  }
+
+  const caption = getOptionalFormString(formData.get("caption"));
+  const sourceUrl = getOptionalFormString(formData.get("sourceUrl"));
+  if (sourceUrl) {
+    try {
+      new URL(sourceUrl);
+    } catch {
+      return error("sourceUrl must be a valid URL", 400);
+    }
+  }
+
+  const bytes = new Uint8Array(await fileEntry.arrayBuffer());
+  const detectedFileType = detectScreenshotFileType(bytes);
+  if (!detectedFileType) {
+    return error("Uploaded file is not a supported screenshot format", 400);
+  }
+
+  if (fileEntry.type && fileEntry.type !== detectedFileType.mimeType) {
+    return error("Uploaded file MIME type does not match file contents", 400);
+  }
+
+  const doId = env.SESSION.idFromName(sessionId);
+  const stub = env.SESSION.get(doId);
+  const artifactsResult = await listSessionArtifactsFromDo(stub, ctx);
+  if (artifactsResult instanceof Response) return artifactsResult;
+
+  const screenshotCount = artifactsResult.filter(
+    (artifact) => artifact.type === "screenshot"
+  ).length;
+  if (screenshotCount >= SCREENSHOT_UPLOAD_LIMIT_PER_SESSION) {
+    return error(
+      `Session screenshot limit of ${SCREENSHOT_UPLOAD_LIMIT_PER_SESSION} uploads exceeded`,
+      429
+    );
+  }
+
+  const artifactId = generateId();
+  const objectKey = buildMediaObjectKey(sessionId, artifactId, detectedFileType.extension);
+  const metadata: ScreenshotArtifactMetadata = {
+    objectKey,
+    mimeType: detectedFileType.mimeType,
+    sizeBytes: bytes.byteLength,
+    ...(viewport ? { viewport } : {}),
+    ...(sourceUrl ? { sourceUrl } : {}),
+    ...(fullPage !== undefined ? { fullPage } : {}),
+    ...(annotated !== undefined ? { annotated } : {}),
+    ...(caption ? { caption } : {}),
+  };
+
+  await env.MEDIA_BUCKET.put(objectKey, bytes, {
+    httpMetadata: { contentType: detectedFileType.mimeType },
+  });
+
+  const createArtifactResponse = await stub.fetch(
+    internalRequest(
+      buildSessionInternalUrl(SessionInternalPaths.createMediaArtifact),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          artifactId,
+          artifactType: "screenshot",
+          objectKey,
+          metadata,
+        }),
+      },
+      ctx
+    )
+  );
+
+  if (!createArtifactResponse.ok) {
+    try {
+      await env.MEDIA_BUCKET.delete(objectKey);
+    } catch (cleanupError) {
+      logger.error("media.upload.cleanup_failed", {
+        session_id: sessionId,
+        artifact_id: artifactId,
+        object_key: objectKey,
+        request_id: ctx.request_id,
+        trace_id: ctx.trace_id,
+        error: cleanupError instanceof Error ? cleanupError : String(cleanupError),
+      });
+    }
+
+    const doErrorText = await createArtifactResponse.text();
+    let doErrorMessage = "Failed to persist media artifact";
+    if (doErrorText) {
+      try {
+        const parsedError = JSON.parse(doErrorText) as { error?: unknown };
+        if (typeof parsedError.error === "string" && parsedError.error.trim()) {
+          doErrorMessage = parsedError.error;
+        } else {
+          doErrorMessage = doErrorText;
+        }
+      } catch {
+        doErrorMessage = doErrorText;
+      }
+    }
+
+    const logData = {
+      session_id: sessionId,
+      artifact_id: artifactId,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+      error: doErrorMessage,
+      http_status: createArtifactResponse.status,
+    };
+
+    if (createArtifactResponse.status >= 500) {
+      logger.error("media.upload.create_artifact_failed", logData);
+      return error("Failed to persist media artifact", 500);
+    }
+
+    logger.warn("media.upload.create_artifact_failed", logData);
+    return error(doErrorMessage, createArtifactResponse.status);
+  }
+
+  return json({ artifactId, objectKey }, 201);
+}
+
 async function handleSessionArtifactContent(
   request: Request,
   env: Env,
@@ -1085,6 +1385,62 @@ async function handleSessionGitChanges(
   if (!stub) return error("Session ID required");
 
   return stub.fetch(internalRequest("http://internal/internal/git/changes", undefined, ctx));
+}
+
+async function handleMediaGet(
+  _request: Request,
+  env: Env,
+  match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  const sessionId = match.groups?.id;
+  const artifactId = match.groups?.artifactId;
+  if (!sessionId || !artifactId) {
+    return error("Session ID and artifact ID are required", 400);
+  }
+  if (!/^[A-Za-z0-9-]+$/.test(artifactId)) {
+    return error("Invalid artifact ID", 400);
+  }
+
+  const doId = env.SESSION.idFromName(sessionId);
+  const stub = env.SESSION.get(doId);
+  const artifact = await getSessionArtifactFromDo(stub, artifactId, ctx);
+  if (artifact instanceof Response) return artifact;
+  if (!artifact || artifact.type !== "screenshot" || !artifact.url) {
+    return error("Media artifact not found", 404);
+  }
+
+  const object = await env.MEDIA_BUCKET.get(artifact.url);
+  if (!object) {
+    logger.warn("media.stream.object_missing", {
+      session_id: sessionId,
+      artifact_id: artifactId,
+      object_key: artifact.url,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+    return error("Media artifact not found", 404);
+  }
+
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  const contentType = getContentTypeFromHeaders(headers) ?? getScreenshotMimeType(artifact);
+  if (!contentType) {
+    logger.error("media.stream.invalid_metadata", {
+      session_id: sessionId,
+      artifact_id: artifactId,
+      object_key: artifact.url,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+    return error("Media artifact is invalid", 500);
+  }
+
+  headers.set("Content-Type", contentType);
+  headers.set("ETag", object.httpEtag);
+  headers.set("Content-Length", String(object.size));
+
+  return new Response(object.body, { headers });
 }
 
 async function handleSessionParticipants(
@@ -1537,7 +1893,13 @@ async function handleSpawnChild(
   const childDoId = env.SESSION.idFromName(childId);
   const childStub = env.SESSION.get(childDoId);
 
-  const model = getValidModelOrDefault(body.model || spawnContext.model);
+  // Validate explicit model from the agent; reject invalid names so the agent
+  // can self-correct instead of silently falling back to the default model.
+  const rawModel = body.model ?? spawnContext.model;
+  if (body.model !== undefined && !isValidModel(body.model)) {
+    return error(`Invalid model "${body.model}". Valid models: ${VALID_MODELS.join(", ")}`, 400);
+  }
+  const model = getValidModelOrDefault(rawModel);
   const reasoningEffort =
     body.reasoningEffort && isValidReasoningEffort(model, body.reasoningEffort)
       ? body.reasoningEffort
@@ -1553,12 +1915,11 @@ async function handleSpawnChild(
     model,
   });
 
-  // Resolve code-server integration setting for child (same repo as parent)
-  const childCodeServerEnabled = await resolveCodeServerEnabled(
-    env.DB,
-    spawnContext.repoOwner,
-    spawnContext.repoName
-  );
+  // Resolve code-server integration setting and sandbox settings for child (same repo as parent)
+  const [childCodeServerEnabled, childSandboxSettings] = await Promise.all([
+    resolveCodeServerEnabled(env.DB, spawnContext.repoOwner, spawnContext.repoName),
+    resolveSandboxSettings(env.DB, spawnContext.repoOwner, spawnContext.repoName),
+  ]);
 
   // Initialize child DO
   const initResponse = await childStub.fetch(
@@ -1588,6 +1949,7 @@ async function handleSpawnChild(
           spawnSource: "agent",
           spawnDepth: childDepth,
           codeServerEnabled: childCodeServerEnabled,
+          sandboxSettings: childSandboxSettings,
         }),
       },
       ctx
@@ -1612,6 +1974,7 @@ async function handleSpawnChild(
     parentSessionId: parentId,
     spawnSource: "agent",
     spawnDepth: childDepth,
+    scmLogin: spawnContext.owner.scmLogin || null,
     createdAt: now,
     updatedAt: now,
   });

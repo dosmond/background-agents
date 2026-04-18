@@ -18,6 +18,7 @@ import {
   parsePattern,
   json,
   error,
+  createRouteSourceControlProvider,
   resolveInstalledRepo,
 } from "./shared";
 
@@ -86,7 +87,8 @@ async function resolveRepoOrError(
   name: string
 ): Promise<{ repoId: number; repoOwner: string; repoName: string } | Response> {
   try {
-    const resolved = await resolveInstalledRepo(env, owner, name);
+    const provider = createRouteSourceControlProvider(env);
+    const resolved = await resolveInstalledRepo(provider, owner, name);
     if (!resolved) return error("Repository is not installed for the GitHub App", 404);
     return resolved;
   } catch (e) {

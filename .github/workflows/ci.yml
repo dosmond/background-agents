@@ -17,10 +17,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: "npm"
@@ -40,10 +40,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: "npm"
@@ -63,10 +63,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: "npm"
@@ -89,10 +89,10 @@ jobs:
         working-directory: packages/sandbox-runtime
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
@@ -117,10 +117,10 @@ jobs:
         working-directory: packages/modal-infra
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
@@ -146,10 +146,10 @@ jobs:
         working-directory: packages/modal-infra
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
@@ -174,10 +174,10 @@ jobs:
         working-directory: packages/sandbox-runtime
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
@@ -191,17 +191,17 @@ jobs:
         run: mypy src/
         continue-on-error: true # Allow failures initially as types are added
 
-  test-typescript:
-    name: Test (TypeScript)
+  test-cp-unit:
+    name: Test (control-plane unit)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: [lint-typescript, typecheck-typescript, build-web]
+    timeout-minutes: 5
+    needs: [lint-typescript, typecheck-typescript]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: "npm"
@@ -212,8 +212,32 @@ jobs:
       - name: Build shared package
         run: npm run build -w @open-inspect/shared
 
-      - name: Run control-plane tests
+      - name: Run shared tests
+        run: npm test -w @open-inspect/shared
+
+      - name: Run control-plane unit tests
         run: npm test -w @open-inspect/control-plane
+
+  test-cp-integration:
+    name: Test (control-plane integration)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lint-typescript, typecheck-typescript]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w @open-inspect/shared
 
       - name: Install workerd runtime dependency
         run: sudo apt-get update && sudo apt-get install -y libc++1
@@ -221,11 +245,59 @@ jobs:
       - name: Run control-plane integration tests
         run: npm run test:integration -w @open-inspect/control-plane
 
-      - name: Run github-bot tests
-        run: npm test -w @open-inspect/github-bot
+  test-web:
+    name: Test (web)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lint-typescript, typecheck-typescript]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w @open-inspect/shared
 
       - name: Run web tests
         run: npm test -w @open-inspect/web
+
+  test-bots:
+    name: Test (bots)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lint-typescript, typecheck-typescript]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w @open-inspect/shared
+
+      - name: Run github-bot tests
+        run: npm test -w @open-inspect/github-bot
+
+      - name: Run slack-bot tests
+        run: npm test -w @open-inspect/slack-bot
+
+      - name: Run linear-bot tests
+        run: npm test -w @open-inspect/linear-bot
 
   test-python-sandbox-runtime:
     name: Test (Python - sandbox-runtime)
@@ -237,10 +309,10 @@ jobs:
         working-directory: packages/sandbox-runtime
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
@@ -263,10 +335,10 @@ jobs:
         working-directory: packages/modal-infra
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
@@ -279,4 +351,3 @@ jobs:
 
       - name: Run tests
         run: pytest tests/ -v
-        continue-on-error: true # Allow failures if tests directory is empty

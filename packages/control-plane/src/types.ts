@@ -43,13 +43,16 @@ export interface Env {
   SLACK_BOT?: Fetcher; // Optional - only if slack-bot is deployed
   LINEAR_BOT?: Fetcher; // Optional - only if linear-bot is deployed
 
-  // Durable Objects (optional)
+  // Durable Objects
   SCHEDULER?: DurableObjectNamespace; // SchedulerDO for automation engine
 
   // D1 database
   DB: D1Database;
   CONTEXT_DOCUMENTS_BUCKET?: R2Bucket;
   SESSION_ARTIFACTS_BUCKET?: R2Bucket;
+
+  // R2 buckets
+  MEDIA_BUCKET: R2Bucket;
 
   // Secrets
   GITHUB_CLIENT_ID?: string;
@@ -59,6 +62,7 @@ export interface Env {
   MODAL_TOKEN_ID?: string;
   MODAL_TOKEN_SECRET?: string;
   MODAL_API_SECRET?: string; // Shared secret for authenticating with Modal endpoints
+  DAYTONA_API_KEY?: string; // Daytona REST API key (Bearer auth + HMAC derivation)
   INTERNAL_CALLBACK_SECRET?: string; // For signing callbacks to slack-bot
 
   // GitHub App secrets (for git operations)
@@ -66,17 +70,27 @@ export interface Env {
   GITHUB_APP_PRIVATE_KEY?: string;
   GITHUB_APP_INSTALLATION_ID?: string;
 
+  // GitLab secrets (for git operations and API access when SCM_PROVIDER=gitlab)
+  GITLAB_ACCESS_TOKEN?: string;
+  GITLAB_NAMESPACE?: string; // Group namespace to scope repository listing
+
   // Variables
   DEPLOYMENT_NAME: string;
   SCM_PROVIDER?: string; // Source control provider for this deployment (default: github)
   WORKER_URL?: string; // Base URL for the worker (for callbacks)
   WEB_APP_URL?: string; // Base URL for the web app (for PR links)
   CF_ACCOUNT_ID?: string; // Cloudflare account ID
+  SANDBOX_PROVIDER?: string; // "modal" (default) or "daytona"
   MODAL_WORKSPACE?: string; // Modal workspace name (used in Modal endpoint URLs)
   CLOUDFLARE_AI_SEARCH_API_TOKEN?: string; // API token for Cloudflare AI Search (AutoRAG)
   CLOUDFLARE_AI_SEARCH_AUTORAG_NAME?: string; // AutoRAG instance name
   CONTEXT_RETRIEVAL_ENABLED?: string; // Feature flag: "true" | "false"
   CONTEXT_INDEXING_ENABLED?: string; // Feature flag: "true" | "false"
+  DAYTONA_API_URL?: string; // Daytona REST API base URL
+  DAYTONA_BASE_SNAPSHOT?: string; // Named Daytona snapshot used for fresh sandbox creation
+  DAYTONA_AUTO_STOP_INTERVAL_MINUTES?: string; // Daytona idle stop interval in minutes
+  DAYTONA_AUTO_ARCHIVE_INTERVAL_MINUTES?: string; // Daytona archive interval in minutes
+  DAYTONA_TARGET?: string; // Optional Daytona target name
 
   // Sandbox lifecycle configuration
   SANDBOX_INACTIVITY_TIMEOUT_MS?: string; // Inactivity timeout in ms (default: 600000 = 10 min)
